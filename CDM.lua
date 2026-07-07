@@ -42,6 +42,13 @@ local function AllViewers()
   }
 end
 
+-- True while Blizzard's Edit Mode is open. We suspend the "hide the CDM" toggle
+-- then so the user can still see + drag the viewers. Plain API, no secret data.
+local function EditModeActive()
+  local em = _G.EditModeManagerFrame
+  return (em and em.IsEditModeActive and em:IsEditModeActive()) and true or false
+end
+
 -- Secret-safe equality: refuses to compare if either side is secret or nil.
 local function plainEq(a, b)
   if a == nil or b == nil then return false end
@@ -78,6 +85,8 @@ function CDM:PlaySound(spellID, cfg)
   cfg = cfg or (GA.db and GA.db.displays and GA.db.displays[spellID])
   local snd = cfg and cfg.sound
   if not snd then return end
+  if EditModeActive() or self._emSettling then return end  -- never on Edit Mode sample data
+
   local now = GetTime()
   local last = self.lastPlay[spellID]
   if last and (now - last) < THROTTLE then return end
@@ -237,6 +246,14 @@ function CDM:RefreshDisplays(silent)
   if not GA.Displays then return end
   local db = GA.db and GA.db.displays
   if not db then return end
+  -- While Blizzard Edit Mode is open the CDM shows SAMPLE data (everything looks
+  -- active), which our mirror would otherwise reflect as real — flipping auras on
+  -- and firing sounds. Freeze display updates then (unless our own config panel is
+  -- forcing a positioning preview). `_emSettling` extends the freeze briefly past
+  -- Edit Mode EXIT: ExitEditMode() clears editModeActive on its first line, then
+  -- tears down the sample data — those teardown transitions would otherwise leak a
+  -- stray show/sound. Real state re-syncs via a silent Discover once it settles.
+  if (EditModeActive() or self._emSettling) and not GA.Displays.forced then return end
   for sid, cfg in pairs(db) do
     if cfg.enabled ~= false then
       local show = self:EvalDisplay(sid, cfg)
@@ -396,6 +413,50 @@ function CDM:Discover()
 
   self:UpdateVisibilityPoll()  -- enable the visibility poll if any display uses it
   self:RefreshDisplays(true)   -- silent initial sync (no sound on reload)
+  self:ApplyBlizzardHide()     -- re-assert the CDM-hide toggle after any re-pool
+end
+
+-- --------------------------------------------------------------------------
+-- Hide Blizzard's Cooldown Manager (optional, global). We MIRROR the CDM's
+-- state, so the viewers must keep updating — and CooldownViewerMixin:OnHide()
+-- unregisters UNIT_AURA/SPELL_UPDATE_COOLDOWN (verified in client source), so a
+-- real Hide() would silently break tracking. Instead we drive only ALPHA: 0 to
+-- hide, restored to Blizzard's own opacity to show. IsShown() stays true, so the
+-- viewers keep firing the transitions our mirror listens to.
+--
+-- Two things fight a naive SetAlpha(0): (1) each viewer's Edit Mode Opacity
+-- setting calls SetAlpha(opacity/100) on every settings re-apply (login, layout,
+-- spec change, edit-mode exit) — countered by the UpdateSystemSettingOpacity hook
+-- in HookViewers; (2) Edit Mode itself, where the user needs to see the viewer —
+-- countered by suspending while EditModeActive().
+-- --------------------------------------------------------------------------
+function CDM:ApplyBlizzardHide()
+  local hide = (GA.db and GA.db.hideBlizzardCDM) and true or false
+  local editing = EditModeActive()
+  local dim = hide and not editing
+  for _, v in ipairs(AllViewers()) do
+    if v then
+      if dim then
+        v:SetAlpha(0)
+      elseif self._blizzForced or editing then
+        -- Only un-dim if WE dimmed it (or we're entering Edit Mode). Restore via
+        -- Blizzard's own opacity apply so a user's custom CDM opacity is preserved.
+        local ok = v.UpdateSystemSettingOpacity and pcall(v.UpdateSystemSettingOpacity, v)
+        if not ok then v:SetAlpha(1) end
+      end
+    end
+  end
+  self._blizzForced = dim
+end
+
+-- Flip / set the global "hide Blizzard CDM" toggle. Returns the new state.
+function CDM:ToggleBlizzardHide(on)
+  if GA.db then
+    if on == nil then on = not GA.db.hideBlizzardCDM end
+    GA.db.hideBlizzardCDM = on and true or false
+  end
+  self:ApplyBlizzardHide()
+  return GA.db and GA.db.hideBlizzardCDM
 end
 
 -- Re-run Discover after the CDM rebuilds its pooled frames. Hook the four
@@ -406,6 +467,14 @@ function CDM:HookViewers()
       v.__gaLayoutHooked = true
       hooksecurefunc(v, "RefreshLayout", function()
         C_Timer.After(0, function() CDM:Discover() end)
+      end)
+    end
+    -- Re-assert our hide right after Blizzard re-applies its Opacity setting
+    -- (it SetAlpha(opacity/100)s on login, layout apply, spec change, edit exit).
+    if v and v.UpdateSystemSettingOpacity and not v.__gaOpacityHooked then
+      v.__gaOpacityHooked = true
+      hooksecurefunc(v, "UpdateSystemSettingOpacity", function(self2)
+        if GA.db and GA.db.hideBlizzardCDM and not EditModeActive() then self2:SetAlpha(0) end
       end)
     end
   end
@@ -434,9 +503,29 @@ function CDM:Init()
   end)
   self._events = ev
 
+  -- Edit Mode opening/closing flips whether we suspend the CDM-hide (so the user
+  -- can see + drag the viewers while arranging their UI).
+  if EventRegistry and not self._editModeHooked then
+    self._editModeHooked = true
+    EventRegistry:RegisterCallback("EditMode.Enter", function()
+      CDM._emSettling = false
+      CDM:ApplyBlizzardHide()
+    end, self)
+    EventRegistry:RegisterCallback("EditMode.Exit", function()
+      CDM:ApplyBlizzardHide()
+      -- Suppress the sample-data teardown transitions, then re-sync to real state.
+      CDM._emSettling = true
+      C_Timer.After(0.4, function()
+        CDM._emSettling = false
+        CDM:Discover()   -- Discover ends with a SILENT RefreshDisplays (no sound)
+      end)
+    end, self)
+  end
+
   self:HookCooldownGlobals()
   self:HookViewers()
   self:Discover()
+  self:ApplyBlizzardHide()
 end
 
 function CDM:UpdateCooldowns()

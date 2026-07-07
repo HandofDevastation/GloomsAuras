@@ -80,8 +80,20 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   PowerAuras Heads-Up/Icons/Separated/Words, Beams, Sparks, Runes), **Game Icons** (all game icons
   via `GetMacroIcons`/`GetLooseMacroIcons`), **StoneTweaks Graphics** (read from `StoneTweaksDB`,
   by path), **Shared Media (bars)** (LibSharedMedia — bar textures only).
-- ✅ **QA'd** Flat input styling (no `InputBoxTemplate`), size cap raised **512 → 8192** + offsets
-  ±4000 (for 4K), display frames **un-clamped** so auras can sit partially/fully off-screen.
+- ✅ **QA'd** Flat input styling (no `InputBoxTemplate`), size cap raised **512 → 8192**, display
+  frames **un-clamped** so auras can sit partially/fully off-screen. X/Y offset **slider** range is
+  **±2000** (narrowed from ±4000 on 2026-07-07 — ±4000 made the slider too coarse; drag-to-move and
+  `/ga pos` stay un-clamped for bigger moves).
+- ⏳ **BUILT 2026-07-07, awaiting QA** — **Custom flat sliders** (dropped `OptionsSliderTemplate` for a
+  plain Slider: dark track = input-field fill, no border, bright-purple vertical marker thumb) +
+  **aspect-ratio lock** on Width/Height (thin 1px purple bracket in the right margin joining the two
+  boxes; when engaged, scaling one scales the other by `cfg.aspect`, the w/h ratio captured at lock
+  time). Lock icon = Jason's custom 24×24 PNGs `Media/lock_locked.png` / `Media/lock_unlocked.png`
+  (colors baked in → shown **untinted**, `SetVertexColor(1,1,1,1)`; state = which texture, not tint).
+  **Texture facts (verified this client):** PNG loads fine AND non-power-of-two is fine — `Media/
+  bg_flame.png` is 5000×4107 and renders. SVG unsupported.
+- ⏳ **Panel tweaks 2026-07-07, awaiting QA** — **Remove** button moved from the editor pane to the
+  LEFT pane directly under "+ Add aura" (renamed "Remove This Aura"); `LIST_ROWS` 19→18 to make room.
 - ✅ **QA'd** Per-display sound picker (2026-07-07) — "Sound" button → picker window (LibSharedMedia
   sounds + None, click-to-preview, draggable scrollbar) + a Test button. `cfg.sound = {file,name,
   channel}`; fires on hidden→shown via `CDM:PlaySound` (throttled). NOTE: **no per-sound volume** —
@@ -94,6 +106,25 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   encounter, resting, stealthed, group, raid, warmode, alive), **Specialization** multi-select,
   **Spell/Talent known**. Engine = `CDM:VisibilityGate` + a 0.2s poll (`UpdateVisibilityPoll`) that
   runs only while some display uses visibility. All plain game APIs (no secret data). See learnings.
+- 🟡 **Hide Blizzard's Cooldown Manager** (global toggle): checkbox in the panel's bottom strip +
+  `/ga hidecdm`. Drives the four viewers' **alpha** only (0 = hidden), NEVER `Hide()` — because
+  `CooldownViewerMixin:OnHide()` unregisters UNIT_AURA/SPELL_UPDATE_COOLDOWN (client source), so a real
+  hide would silently break our mirror. `IsShown()` stays true → tracking keeps running. Suspended while
+  Edit Mode is open (so the viewers stay visible/movable); re-asserts alpha-0 after Blizzard re-applies
+  its own Opacity setting via a per-viewer `hooksecurefunc(v,"UpdateSystemSettingOpacity")`. Engine:
+  `CDM:ApplyBlizzardHide` / `ToggleBlizzardHide` + `EditMode.Enter`/`Exit` callbacks. Global `db.hideBlizzardCDM`.
+  - ✅ **QA'd 2026-07-07**: `/ga hidecdm` hides the CDM icons AND tracking still fires (Rapid Fire aura
+    confirmed working with the CDM invisible — proves alpha-0 keeps the mirror alive). Edit Mode
+    round-trip confirmed: CDM reappears + movable while editing, re-hides on exit.
+  - **LEARNING (Edit Mode = sample data):** entering Edit Mode makes the CDM display SAMPLE/preview
+    state (all items look active) — our mirror faithfully reflected it, so auras flipped on + sounds
+    fired. `RefreshDisplays`/`PlaySound` now bail while suppressed. **Subtle bug (fixed 2026-07-07):**
+    the sound leaked on Edit Mode *EXIT*, not enter — `EditModeManagerFrame:ExitEditMode()` clears
+    `editModeActive` on its FIRST line, THEN tears down the sample data, so those teardown transitions
+    saw `EditModeActive()==false` and slipped a stray show/sound through. Fix: a `CDM._emSettling`
+    window (set on `EditMode.Exit`, cleared after 0.4s) extends the freeze past exit, then a silent
+    `Discover` re-syncs. ⏳ verify no sound on EM enter OR exit.
+  - ⏳ **Still to QA**: the panel checkbox reflects/toggles state; persistence across `/reload`.
 
 ## Hard-won LEARNINGS (verified — do NOT rediscover)
 - The frame method is **`StopMovingOrSizing`**, NOT `StopMovingAndSizing` (nonexistent). The
@@ -142,6 +173,7 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
 - `/ga debug` — CDM state dump (availability/kind/charge/IsSpellUsable per display). Ask Jason
   to paste this (or BugSack) when diagnosing.
 - `/ga minimap` — show/hide the minimap button (persisted).
+- `/ga hidecdm` — hide/show Blizzard's Cooldown Manager (alpha-0, tracking stays live; persisted).
 - `/ga charges` — which cooldowns support availability tracking (charge spells flagged). Run OOC.
 - `/ga trace` — per-display trigger diagnostic (shown?, buffActive/available mirror, item cooldown
   fields, each condition's eval). Run IN the failing state; makes trigger bugs a 30-sec find.
@@ -150,6 +182,7 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
 ## SavedVariables data model  `GloomsAurasDB.displays[spellID]`
 ```
 { spellID, label, enabled=true, width=64, height=64, point={"CENTER",x,y}, alpha=1,
+  lockAspect = bool/nil,  aspect = <w/h ratio captured at lock time> or nil,
   showLabel=true, texture = <path/fileID or nil=spell icon>,
   color = {r,g,b} or nil,  desaturate = bool/nil,  blend = <mode or nil=BLEND>,
   strata = <mode or nil=HIGH>,  sound = { file, name, channel } or nil,
@@ -158,10 +191,12 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
     instance/encounter/resting/stealthed/group/raid/warmode/alive = true/nil,
     specs = { [specID]=true } or nil, spellKnown = spellID or nil } }
 ```
+`GloomsAurasDB.hideBlizzardCDM = true/nil` (global; hides the four Blizzard CDM viewers via alpha-0).
 `GloomsAurasDB.minimap = { hide, minimapPos }` (LibDBIcon). Display shows when its **Trigger**
 passes AND its **Visibility** gate passes (no visibility set ⇒ always eligible).
 `state` ∈ `buff_active | buff_inactive | cd_ready | cd_oncd`. No trigger ⇒ auto-behavior
-(display's own spell: buff→active, cooldown→available). Width/Height range 8–8192, offsets ±4000.
+(display's own spell: buff→active, cooldown→available). Width/Height range 8–8192, offset slider ±2000
+(drag/`/ga pos` un-clamped).
 `GloomsAurasDB.panelPos` stores the panel location; `db.schema`, `db.media` reserved.
 
 ## Texture picker sourcing (verified 2026-07-07 — do NOT relitigate)
@@ -190,8 +225,8 @@ passes AND its **Visibility** gate passes (no visibility set ⇒ always eligible
    `IsAdvancedFlyableArea` which is about the zone.)
 6. **Text overlays** (manual text e.g. keybind) + LSM **font** picker (would also surface Jason's
    StoneTweaks fonts, already in LSM as "font").
-7. **Requested feature idea:** a toggle to hide the Blizzard CDM viewers (alpha-0, NOT Hide();
-   verify it doesn't break tracking or fight Edit Mode).
+7. ⏳ **BUILT 2026-07-07, awaiting QA** — toggle to hide the Blizzard CDM viewers (alpha-0, NOT Hide();
+   suspends during Edit Mode; re-asserts after Blizzard's Opacity setting). See BUILT list above.
 8. Export/import strings for sharing (later).
 
 ## Current in-game context
@@ -213,9 +248,8 @@ Now a **git repo** (initialized 2026-07-07). Mirrors GloomsBuildBarn's setup:
   Jason's live working copy keeps its `Libs/` (gitignore doesn't delete), so nothing breaks locally.
 - **Committed** bundled art: `Media/` (fonts, `bg_flame.png`, `minimap.png`, `Textures/`,
   `TextureManifest.lua`) + `PowerAurasMedia/Auras/`. These are ours, not packager-fetched.
-- **Push status:** committed locally on `main`; remote `origin` set to
-  `https://github.com/HandofDevastation/GloomsAuras.git`. A push attempt **authenticated fine**
-  (creds cached) but returned **"Repository not found"** — the GitHub repo doesn't exist yet. Next:
-  create it (github.com/new → owner `HandofDevastation`, name `GloomsAuras`, don't add a README), then
-  `git push -u origin main`. NOTE before making it public: the repo bundles WeakAuras/PowerAuras
-  textures (GPL-family) — fine for guild use, worth a license glance if published widely.
+- **Push status:** LIVE on GitHub — https://github.com/HandofDevastation/GloomsAuras (created + pushed
+  at the end of the 2026-07-07 session, after the handoff was first written). `origin` is
+  `https://github.com/HandofDevastation/GloomsAuras.git`, tracking `main`. NOTE before making it public/
+  wide: the repo bundles WeakAuras/PowerAuras textures (GPL-family) — fine for guild use, worth a
+  license glance if published widely.

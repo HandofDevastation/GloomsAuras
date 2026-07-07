@@ -29,7 +29,7 @@ local triggerFrame, triggerEditID, triggerTitle, triggerLogicBtn
 local rows, triggerRows = {}, {}
 
 local listFrame, listRows, listData, listOffset = nil, {}, {}, 0
-local LIST_ROWS = 19
+local LIST_ROWS = 18   -- one fewer row to make room for the Remove button under Add
 local LIST_ROW_H = 24
 
 -- Texture blend modes (SetBlendMode) + friendly labels; frame strata choices.
@@ -196,16 +196,23 @@ local function MakeSlider(parent, yOff, label, minV, maxV, step, get, set)
   local minus = flatButton(parent, 22, 20, COLOR.heroic, "−", 15)
   minus:SetPoint("TOPLEFT", 86, yOff + 3)
 
-  -- Slider is best-effort: if the template is unavailable the row still works
-  -- via steppers + value box.
+  -- Flat slider (own look, no template): a dark track matching the input fields
+  -- (no border) + a bright-purple vertical marker for the thumb. Best-effort: if
+  -- it can't be built the row still works via the steppers + value box.
   local slider
-  pcall(function() slider = CreateFrame("Slider", nil, parent, "OptionsSliderTemplate") end)
+  pcall(function() slider = CreateFrame("Slider", nil, parent) end)
   if slider then
-    slider:SetSize(150, 16); slider:SetPoint("TOPLEFT", 116, yOff + 1)
+    slider:SetOrientation("HORIZONTAL")
+    slider:SetSize(150, 18); slider:SetPoint("TOPLEFT", 116, yOff + 1)
+    slider:SetHitRectInsets(0, 0, -5, -5)  -- taller grab area than the thin track
+    local track = slider:CreateTexture(nil, "BACKGROUND")
+    track:SetPoint("LEFT", 0, 0); track:SetPoint("RIGHT", 0, 0); track:SetHeight(8)
+    track:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.10)  -- = input-field fill
+    local thumb = slider:CreateTexture(nil, "OVERLAY")
+    thumb:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 1)      -- bright marker
+    thumb:SetSize(6, 18)
+    slider:SetThumbTexture(thumb)
     slider:SetMinMaxValues(minV, maxV); slider:SetValueStep(step); slider:SetObeyStepOnDrag(true)
-    if slider.Low then slider.Low:SetText("") end
-    if slider.High then slider.High:SetText("") end
-    if slider.Text then slider.Text:SetText("") end
   end
 
   local plus = flatButton(parent, 22, 20, COLOR.heroic, "+", 15)
@@ -910,7 +917,7 @@ local function RefreshTrigger()
   cfg.trigger = cfg.trigger or { logic = "AND", conditions = {} }
   local t = cfg.trigger
   triggerTitle:SetText("Trigger: " .. (cfg.label or tostring(triggerEditID)))
-  triggerLogicBtn:SetText(t.logic == "OR" and "Match ANY (OR)" or "Match ALL (AND)")
+  triggerLogicBtn:SetText(t.logic == "OR" and "Match Any (OR)" or "Match All (AND)")
   for i, row in ipairs(triggerRows) do
     local c = t.conditions[i]
     if c then
@@ -956,7 +963,7 @@ local function BuildTriggerEditor()
   local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2); tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
   tb:SetScript("OnDragStart", function() f:StartMoving() end); tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
 
-  triggerLogicBtn = flatButton(f, 150, 22, COLOR.purple, "Match ALL (AND)", 12)
+  triggerLogicBtn = flatButton(f, 150, 22, COLOR.purple, "Match All (AND)", 12)
   triggerLogicBtn:SetPoint("TOPLEFT", 16, -40)
   triggerLogicBtn:SetScript("OnClick", function()
     local cfg = TE_Cfg(); if not cfg or not cfg.trigger then return end
@@ -989,7 +996,7 @@ local function BuildTriggerEditor()
     triggerRows[i] = row
   end
 
-  local add = flatButton(f, 150, 24, COLOR.purple, "+ Add condition", 12)
+  local add = flatButton(f, 150, 24, COLOR.purple, "+ Add Condition", 12)
   add:SetPoint("BOTTOMLEFT", 16, 16)
   add:SetScript("OnClick", function() OpenPicker(function(sid) AddCondition(sid) end) end)
   local ah = newText(f, FONT.body, 11, MUTE, "CENTER"); ah:SetPoint("BOTTOM", 0, 20); ah:SetText("no conditions = the aura shows on its own state · click a state to change it")
@@ -1079,8 +1086,8 @@ local function BuildVisibilityEditor()
   local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2); tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
   tb:SetScript("OnDragStart", function() f:StartMoving() end); tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
 
-  veCycle(f, 16, -56, 185, "Combat", { { "any", "Any" }, { "in", "In combat" }, { "out", "Out of combat" } }, "combat")
-  veCycle(f, 219, -56, 185, "Target", { { "any", "Any" }, { "has", "Has target" }, { "none", "No target" } }, "target")
+  veCycle(f, 16, -56, 185, "Combat", { { "any", "Any" }, { "in", "In Combat" }, { "out", "Out of Combat" } }, "combat")
+  veCycle(f, 219, -56, 185, "Target", { { "any", "Any" }, { "has", "Has Target" }, { "none", "No Target" } }, "target")
 
   local L, R, y0, dy = 20, 220, -90, 26
   veToggle(f, L, y0,        "casting",   "While casting")
@@ -1158,7 +1165,7 @@ end
 -- --------------------------------------------------------------------------
 -- Build the main panel (two-pane: aura list | settings editor).
 -- --------------------------------------------------------------------------
-local PANEL_W, PANEL_H = 580, 600
+local PANEL_W, PANEL_H = 580, 628
 local INSET, TITLEBAR_H = 14, 32
 local CONTENT_TOP = -(TITLEBAR_H + 8)   -- -40
 local LIST_W = 160
@@ -1213,9 +1220,22 @@ local function Build()
     listRows[i] = row
   end
 
-  local addBtn = flatButton(listFrame, LIST_W, 26, COLOR.purple, "+ Add aura", 13)
-  addBtn:SetPoint("BOTTOMLEFT", 0, 0)
+  local addBtn = flatButton(listFrame, LIST_W, 26, COLOR.purple, "+ Add Aura", 13)
+  addBtn:SetPoint("BOTTOMLEFT", 0, 28)
   addBtn:SetScript("OnClick", function() OpenPicker() end)
+
+  -- Remove the selected aura — sits directly under "+ Add aura".
+  local removeBtn = flatButton(listFrame, LIST_W, 26, COLOR.orange, "Remove This Aura", 13)
+  removeBtn:SetPoint("BOTTOMLEFT", 0, 0)
+  removeBtn:SetScript("OnClick", function()
+    if selectedID and DB() then
+      local gone = selectedID
+      DB()[gone] = nil
+      if GA.Displays and GA.Displays.frames[gone] then GA.Displays.frames[gone]:Hide() end
+      if GA.CDM then GA.CDM:Discover() end
+      SetSelected(DisplayList()[1])
+    end
+  end)
 
   -- ---- RIGHT PANE: the settings editor ----
   local editor = CreateFrame("Frame", nil, p)
@@ -1279,16 +1299,73 @@ local function Build()
     function(v) local c = Cfg(); if c then c.alpha = v / 100 end end)
 
   Header(editor, 12, -186, "Position and Size")
-  rows[#rows + 1] = MakeSlider(editor, -212, "Width", 8, 8192, 2,
+  -- Width/Height are cross-linked when the aspect lock is engaged: changing one
+  -- scales the other by cfg.aspect (the w/h ratio captured when the lock was set).
+  local widthRow, heightRow
+  local function clampDim(n) return math.max(8, math.min(8192, math.floor(n + 0.5))) end
+  widthRow = MakeSlider(editor, -212, "Width", 8, 8192, 2,
     function() local c = Cfg(); return c and (c.width or c.size) end,
-    function(v) local c = Cfg(); if c then c.width = v end end)
-  rows[#rows + 1] = MakeSlider(editor, -244, "Height", 8, 8192, 2,
+    function(v)
+      local c = Cfg(); if not c then return end
+      c.width = v
+      if c.lockAspect then
+        c.height = clampDim(v / (c.aspect or 1))
+        if heightRow then heightRow:refresh() end
+      end
+    end)
+  rows[#rows + 1] = widthRow
+  heightRow = MakeSlider(editor, -244, "Height", 8, 8192, 2,
     function() local c = Cfg(); return c and (c.height or c.size) end,
-    function(v) local c = Cfg(); if c then c.height = v end end)
-  rows[#rows + 1] = MakeSlider(editor, -276, "X Offset", -4000, 4000, 5,
+    function(v)
+      local c = Cfg(); if not c then return end
+      c.height = v
+      if c.lockAspect then
+        c.width = clampDim(v * (c.aspect or 1))
+        if widthRow then widthRow:refresh() end
+      end
+    end)
+  rows[#rows + 1] = heightRow
+
+  -- Aspect-ratio lock: a thin 1px bracket in the right margin whose two arms point
+  -- at the Width & Height boxes (starting past their edge so they don't overlap),
+  -- joined by a short spine with the padlock sitting on it.
+  local BRP, BRA = COLOR.purple, 0.6
+  local brTop = editor:CreateTexture(nil, "ARTWORK"); brTop:SetColorTexture(BRP.r, BRP.g, BRP.b, BRA)
+  brTop:SetPoint("TOPLEFT", 357, -220); brTop:SetSize(5, 1)     -- arm at the Width box centerline
+  local brBot = editor:CreateTexture(nil, "ARTWORK"); brBot:SetColorTexture(BRP.r, BRP.g, BRP.b, BRA)
+  brBot:SetPoint("TOPLEFT", 357, -252); brBot:SetSize(5, 1)     -- arm at the Height box centerline
+  local brSpine = editor:CreateTexture(nil, "ARTWORK"); brSpine:SetColorTexture(BRP.r, BRP.g, BRP.b, BRA)
+  brSpine:SetPoint("TOPLEFT", 361, -220); brSpine:SetSize(1, 33)  -- joins the two arms
+
+  local aspectBtn = CreateFrame("Button", nil, editor)
+  aspectBtn:SetSize(14, 14); aspectBtn:SetPoint("LEFT", brSpine, "RIGHT", 0, 0)
+  local alock = aspectBtn:CreateTexture(nil, "ARTWORK"); alock:SetAllPoints()
+  -- Jason's custom lock icons (Media/lock_locked.png / lock_unlocked.png) with colors
+  -- baked in — no tint, just swap the texture by state (white vertex = show as-authored).
+  local LOCK_ON, LOCK_OFF = MEDIA .. "lock_locked.png", MEDIA .. "lock_unlocked.png"
+  local function alockRefresh()
+    local c = Cfg(); local on = c and c.lockAspect
+    alock:SetTexture(on and LOCK_ON or LOCK_OFF)
+    alock:SetVertexColor(1, 1, 1, 1)
+  end
+  aspectBtn:SetScript("OnClick", function()
+    local c = Cfg(); if not c then return end
+    local on = not c.lockAspect
+    c.lockAspect = on or nil
+    if on then
+      local w, h = (c.width or c.size or 64), (c.height or c.size or 64)
+      c.aspect = (h > 0) and (w / h) or 1
+    end
+    alockRefresh()
+  end)
+  rows[#rows + 1] = {
+    refresh = alockRefresh,
+    setEnabled = function(_, on) aspectBtn:SetEnabled(on); alock:SetDesaturated(not on) end,
+  }
+  rows[#rows + 1] = MakeSlider(editor, -276, "X Offset", -2000, 2000, 5,
     function() local c = Cfg(); return c and c.point and c.point[2] end,
     function(v) local c = Cfg(); if c then c.point = { "CENTER", v, (c.point and c.point[3]) or 0 } end end)
-  rows[#rows + 1] = MakeSlider(editor, -308, "Y Offset", -4000, 4000, 5,
+  rows[#rows + 1] = MakeSlider(editor, -308, "Y Offset", -2000, 2000, 5,
     function() local c = Cfg(); return c and c.point and c.point[3] end,
     function(v) local c = Cfg(); if c then c.point = { "CENTER", (c.point and c.point[2]) or 0, v } end end)
 
@@ -1327,16 +1404,16 @@ local function Build()
     setEnabled = function(_, on) soundBtn:SetEnabled(on); testBtn:SetEnabled(on) end,
   }
 
-  local remove = flatButton(editor, 150, 24, COLOR.orange, "Remove this display", 12)
-  remove:SetPoint("BOTTOMRIGHT", 0, 2)
-  remove:SetScript("OnClick", function()
-    if selectedID and DB() then
-      local gone = selectedID
-      DB()[gone] = nil
-      if GA.Displays and GA.Displays.frames[gone] then GA.Displays.frames[gone]:Hide() end
-      if GA.CDM then GA.CDM:Discover() end
-      SetSelected(DisplayList()[1])
-    end
+  -- (Remove button lives under "+ Add aura" in the left pane — see below.)
+
+  -- ---- Global option (bottom strip): hide Blizzard's own Cooldown Manager ----
+  -- Drives viewer alpha only (not Hide()), so our state mirror keeps working.
+  local hideCDM = flatCheck(p, "Hide Blizzard's Cooldown Manager (tracking stays active)")
+  hideCDM:SetPoint("BOTTOMLEFT", INSET, 34)
+  hideCDM:SetScript("OnClick", function()
+    local on = not hideCDM:Get()
+    hideCDM:Set(on)
+    if GA.CDM and GA.CDM.ToggleBlizzardHide then GA.CDM:ToggleBlizzardHide(on) end
   end)
 
   local hint = newText(p, FONT.body, 11, MUTE, "CENTER")
@@ -1344,6 +1421,7 @@ local function Build()
   hint:SetText("Drag the title bar to move · drag an aura on screen to place it · blank texture = spell icon")
 
   p:SetScript("OnShow", function()
+    hideCDM:Set(GA.db and GA.db.hideBlizzardCDM)
     local pos = GA.db and GA.db.panelPos
     if pos then p:ClearAllPoints(); p:SetPoint("CENTER", UIParent, "CENTER", pos[1] or 0, pos[2] or 0) end
     if GA.Displays then

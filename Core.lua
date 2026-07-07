@@ -174,6 +174,7 @@ local function SlashHandler(input)
     print("  |cffffd200/ga preview|r            — show all displays while you position them")
     print("  |cffffd200/ga test|r               — flash displays for 5s")
     print("  |cffffd200/ga minimap|r            — show/hide the minimap button")
+    print("  |cffffd200/ga hidecdm|r            — hide/show Blizzard's Cooldown Manager")
     print("  |cffffd200/ga trace|r              — per-display trigger diagnostic")
     print("  |cffffd200/ga debug|r              — Cooldown Manager diagnostics")
   elseif cmd == "add" then
@@ -194,6 +195,14 @@ local function SlashHandler(input)
     if GA.ToggleMinimapButton then
       local shown = GA:ToggleMinimapButton()
       msg("minimap button " .. (shown and "|cff55ff55shown|r" or "|cffff5555hidden|r") .. ".")
+    end
+  elseif cmd == "hidecdm" then
+    if GA.CDM and GA.CDM.ToggleBlizzardHide then
+      local hidden = GA.CDM:ToggleBlizzardHide()
+      msg("Blizzard Cooldown Manager " .. (hidden and "|cffff5555hidden|r" or "|cff55ff55shown|r") ..
+          ". (Kept tracking alive — the viewers still update, just invisible.)")
+    else
+      msg("CDM engine not ready yet.")
     end
   elseif cmd == "charges" then
     if GA.CDM and GA.CDM.ReportCharges then GA.CDM:ReportCharges() else msg("CDM engine not ready yet.") end
