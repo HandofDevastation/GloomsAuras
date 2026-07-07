@@ -93,7 +93,19 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   **Texture facts (verified this client):** PNG loads fine AND non-power-of-two is fine — `Media/
   bg_flame.png` is 5000×4107 and renders. SVG unsupported.
 - ⏳ **Panel tweaks 2026-07-07, awaiting QA** — **Remove** button moved from the editor pane to the
-  LEFT pane directly under "+ Add aura" (renamed "Remove This Aura"); `LIST_ROWS` 19→18 to make room.
+  LEFT pane; all button labels to **Title Case**. Left pane now stacks **Add / Duplicate / Remove**
+  (`LIST_ROWS` → 17).
+- ⏳ **Duplicate Aura 2026-07-07, awaiting QA (REGRESSION-SENSITIVE)** — "Duplicate Aura" button makes
+  an exact copy of the selected aura, INCLUDING on the same spell. Required re-keying `db.displays`
+  from spellID → display id (see data-model note above); done backward-compatibly (originals keep
+  their spellID key + `cfg.spellID`, so existing auras behave identically). Copy is deep-copied
+  (independent trigger/visibility/sound), labelled "… (copy)", nudged +24/−24 so it doesn't overlap.
+  **Restore point before this work: commit `248a9a7`** (`git reset --hard 248a9a7` to undo). QA order:
+  FIRST confirm existing auras still show/hide + render exactly as before, THEN test Duplicate.
+  - **Drag = selected only (2026-07-07):** with the panel open, only the aura selected in the left
+    list is mouse-draggable on screen (others are visible but click-through) — so overlapping
+    duplicates don't fight for the cursor. `D.selectedID` + `D:ApplyInteractivity`; Config sets it in
+    `SetSelected` and clears it on panel close (nil ⇒ `/ga preview` back-door still drags all).
 - ✅ **QA'd** Per-display sound picker (2026-07-07) — "Sound" button → picker window (LibSharedMedia
   sounds + None, click-to-preview, draggable scrollbar) + a Test button. `cfg.sound = {file,name,
   channel}`; fires on hidden→shown via `CDM:PlaySound` (throttled). NOTE: **no per-sound volume** —
@@ -179,7 +191,14 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   fields, each condition's eval). Run IN the failing state; makes trigger bugs a 30-sec find.
 - `/ga add|remove|list|pos|size|preview|test` — legacy/back-door commands (panel is primary).
 
-## SavedVariables data model  `GloomsAurasDB.displays[spellID]`
+## SavedVariables data model  `GloomsAurasDB.displays[<displayID>]`
+> **Keying (changed 2026-07-07 for Duplicate):** the table key is now an opaque **display id**, NOT
+> the spellID. Originals keep a numeric **spellID** key (so existing data is untouched); **duplicates**
+> get a unique `"dN"` **string** key (counter `GloomsAurasDB.seq`). The tracked spell is ALWAYS
+> `cfg.spellID`. Rule of thumb: `GA.Displays.frames[]`, `CDM.lastShown[]`, `lastPlay[]`, `selectedID`,
+> and every `db.displays` iteration key = **display id**; `CDM.kind/available/buffActive/isCharge[]`,
+> `frameToSpell` values, and all `C_Spell.*` calls = **cfg.spellID**. `DisplayList()` sorts by
+> `cfg.spellID` then key (never compares number vs string → no error; existing order unchanged).
 ```
 { spellID, label, enabled=true, width=64, height=64, point={"CENTER",x,y}, alpha=1,
   lockAspect = bool/nil,  aspect = <w/h ratio captured at lock time> or nil,

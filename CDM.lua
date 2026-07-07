@@ -111,9 +111,9 @@ function CDM:WatchedSpells()
   local set = {}
   local db = GA.db and GA.db.displays
   if db then
-    for sid, cfg in pairs(db) do
+    for _id, cfg in pairs(db) do
       if cfg.enabled ~= false then
-        set[sid] = true
+        if cfg.spellID then set[cfg.spellID] = true end   -- the display's own tracked spell
         local conds = cfg.trigger and cfg.trigger.conditions
         if conds then
           for _, c in ipairs(conds) do if c.spellID then set[c.spellID] = true end end
@@ -227,12 +227,13 @@ function CDM:UpdateVisibilityPoll()
   if uses then self._visFrame:Show() else self._visFrame:Hide() end
 end
 
-function CDM:EvalDisplay(sid, cfg)
+function CDM:EvalDisplay(id, cfg)
   if not self:VisibilityGate(cfg) then return false end  -- context gate ANDs with trigger
   local t = cfg.trigger
   if t and t.conditions and #t.conditions > 0 then
     return self:EvalTrigger(t)
   end
+  local sid = cfg.spellID  -- auto-behavior keys off the display's OWN tracked spell
   if self.kind[sid] == "cooldown" then
     local a = self.available[sid]; if a == nil then a = true end
     return a == true
@@ -530,8 +531,10 @@ end
 
 function CDM:UpdateCooldowns()
   if not GA.Displays then return end
-  for spellID, kind in pairs(self.kind) do
-    if kind == "cooldown" then GA.Displays:UpdateCooldown(spellID) end
+  local db = GA.db and GA.db.displays
+  if not db then return end
+  for id, cfg in pairs(db) do            -- per DISPLAY (a spell may back several)
+    if self.kind[cfg.spellID] == "cooldown" then GA.Displays:UpdateCooldown(id) end
   end
 end
 
@@ -584,32 +587,33 @@ function CDM:Debug()
   end
 
   local db = (GA.db and GA.db.displays) or {}
-  for spellID, cfg in pairs(db) do
+  for _id, cfg in pairs(db) do
+    local sid = cfg.spellID
     local frame
-    for f, sid in pairs(self.frameToSpell) do
-      if sid == spellID then frame = f; break end
+    for f, fs in pairs(self.frameToSpell) do
+      if fs == sid then frame = f; break end
     end
     if frame then
-      local kind = self.kind[spellID] or "?"
+      local kind = self.kind[sid] or "?"
       local _, active = pcall(frame.IsActive, frame)
       local extra = ""
       if kind == "cooldown" then
         extra = ("  |cffffd200avail=%s charge=%s|r"):format(
-          tostring(self.available[spellID]), tostring(self.isCharge[spellID]))
+          tostring(self.available[sid]), tostring(self.isCharge[sid]))
         pcall(function()
-          local u = C_Spell and C_Spell.IsSpellUsable and C_Spell.IsSpellUsable(spellID)
+          local u = C_Spell and C_Spell.IsSpellUsable and C_Spell.IsSpellUsable(sid)
           extra = extra .. ("  IsSpellUsable=%s"):format(fmtBool(u))
         end)
         pcall(function()
-          local ci = C_Spell and C_Spell.GetSpellCharges and C_Spell.GetSpellCharges(spellID)
+          local ci = C_Spell and C_Spell.GetSpellCharges and C_Spell.GetSpellCharges(sid)
           if ci then extra = extra .. ("  charges=%s/%s"):format(fmtBool(ci.currentCharges), fmtBool(ci.maxCharges)) end
         end)
       end
       print(("  display %s (%s) [%s]: |cff55ff55FOUND|r active=%s (secret %s)%s"):format(
-        tostring(spellID), cfg.label or "?", kind, fmtBool(active), tostring(issecret(active)), extra))
+        tostring(sid), cfg.label or "?", kind, fmtBool(active), tostring(issecret(active)), extra))
     else
       print(("  display %s (%s): |cffff5555NOT FOUND|r — is it placed in your Cooldown Manager?"):format(
-        tostring(spellID), cfg.label or "?"))
+        tostring(sid), cfg.label or "?"))
     end
   end
 end
@@ -621,18 +625,19 @@ end
 function CDM:Trace()
   GA.msg("=== trigger trace (run while reproducing the problem) ===")
   local db = (GA.db and GA.db.displays) or {}
-  for spellID, cfg in pairs(db) do
+  for id, cfg in pairs(db) do
     if cfg.enabled ~= false then
+      local sid = cfg.spellID              -- tracked spell (state lookups); id = display key (frame)
       local frame
-      for f, sid in pairs(self.frameToSpell) do if sid == spellID then frame = f; break end end
-      local dispFrame = GA.Displays and GA.Displays.frames and GA.Displays.frames[spellID]
+      for f, fs in pairs(self.frameToSpell) do if fs == sid then frame = f; break end end
+      local dispFrame = GA.Displays and GA.Displays.frames and GA.Displays.frames[id]
       local shown = dispFrame and dispFrame:IsShown() and true or false
       print(("|cff936bff%s|r (%s) [%s]  shown=%s%s"):format(
-        cfg.label or "?", tostring(spellID), self.kind[spellID] or "?", tostring(shown),
+        cfg.label or "?", tostring(sid), self.kind[sid] or "?", tostring(shown),
         frame and "" or "  |cffff5555<item NOT found>|r"))
       print(("   mirror: buffActive=%s  available=%s  charge=%s"):format(
-        fmtBool(self.buffActive[spellID]), fmtBool(self.available[spellID]), tostring(self.isCharge[spellID])))
-      if frame and self.kind[spellID] == "cooldown" then
+        fmtBool(self.buffActive[sid]), fmtBool(self.available[sid]), tostring(self.isCharge[sid])))
+      if frame and self.kind[sid] == "cooldown" then
         print(("   item: isOnActualCooldown=%s cooldownIsActive=%s isOnGCD=%s start=%s"):format(
           fmtBool(frame.isOnActualCooldown), fmtBool(frame.cooldownIsActive),
           fmtBool(frame.isOnGCD), fmtBool(frame.cooldownStartTime)))
@@ -644,7 +649,7 @@ function CDM:Trace()
           local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(c.spellID)) or "?"
           print(("      [%s] %s (%s) => %s"):format(c.state, nm, tostring(c.spellID), tostring(self:EvalCondition(c))))
         end
-        print(("   => EvalDisplay=%s"):format(tostring(self:EvalDisplay(spellID, cfg))))
+        print(("   => EvalDisplay=%s"):format(tostring(self:EvalDisplay(id, cfg))))
       else
         print("   (no trigger — auto behavior)")
       end

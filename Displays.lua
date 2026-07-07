@@ -1,8 +1,12 @@
 -- Displays.lua — Gloom's Auras: display objects
 --
 -- A "display" is one custom on-screen texture (+ label) bound to a tracked spell.
--- Config lives in GloomsAurasDB.displays[spellID]; this module turns that into a
--- frame and owns HOW it looks + WHERE it sits. Position and size are set with
+-- Config lives in GloomsAurasDB.displays[<id>], keyed by an opaque DISPLAY ID (a
+-- spellID for the original of each spell, a unique "dN" string for duplicates);
+-- the tracked spell is always cfg.spellID. Every function here takes that display
+-- id (param named `spellID` for history) and reads the real spell from cfg.spellID.
+-- This module turns config into a frame and owns HOW it looks + WHERE it sits. CDM
+-- decides WHEN. Position and size are set with
 -- numeric /ga commands (reliable on every client — no mouse dragging). CDM.lua
 -- decides WHEN each display is shown.
 
@@ -12,8 +16,9 @@ local GA = _G.GloomsAuras
 local D = {}
 GA.Displays = D
 
-D.frames = {}     -- spellID -> frame
-D.forced = false  -- true while previewing/testing: ignore CDM show/hide
+D.frames = {}       -- display id -> frame
+D.forced = false    -- true while previewing/testing: ignore CDM show/hide
+D.selectedID = nil  -- the aura selected in the panel; only it is draggable (nil = all)
 
 local function DB()
   return GA.db and GA.db.displays
@@ -35,7 +40,7 @@ function D:GetOrCreate(spellID)
   if not f then
     f = CreateFrame("Frame", "GloomsAurasDisplay" .. spellID, UIParent)
     f:SetFrameStrata("HIGH")
-    f.spellID = spellID
+    f.spellID = cfg.spellID or spellID   -- the tracked spell (the key may be a duplicate id)
 
     local tex = f:CreateTexture(nil, "ARTWORK")
     tex:SetAllPoints()
@@ -63,7 +68,10 @@ function D:GetOrCreate(spellID)
     f:SetMovable(true)
     f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", function(self2)
-      if D.forced then self2.__dragging = true; self2:StartMoving() end
+      -- Only the selected aura drags (nil selection = preview back-door: any drags).
+      if not D.forced then return end
+      if D.selectedID and D.frames[D.selectedID] ~= self2 then return end
+      self2.__dragging = true; self2:StartMoving()
     end)
     f:SetScript("OnDragStop", function(self2)
       self2:StopMovingOrSizing(); self2.__dragging = false
@@ -76,7 +84,7 @@ function D:GetOrCreate(spellID)
   end
 
   self:ApplyConfig(spellID)
-  f:EnableMouse(self.forced and true or false)
+  f:EnableMouse((self.forced and (self.selectedID == nil or spellID == self.selectedID)) and true or false)
   return f
 end
 
@@ -103,7 +111,7 @@ function D:ApplyConfig(spellID)
     f.tex:SetTexture(custom)
     f.tex:SetTexCoord(0, 1, 0, 1)
   else
-    local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(spellID)
+    local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(cfg.spellID or spellID)
     if icon then
       f.tex:SetTexture(icon)
       f.tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)  -- trim the default icon border
@@ -127,7 +135,7 @@ function D:ApplyConfig(spellID)
   f:SetFrameStrata((cfg.strata and cfg.strata ~= "" and cfg.strata) or "HIGH")
 
   if cfg.showLabel ~= false then
-    f.label:SetText(cfg.label or tostring(spellID))
+    f.label:SetText(cfg.label or tostring(cfg.spellID or spellID))
     f.label:Show()
   else
     f.label:Hide()
@@ -172,8 +180,25 @@ function D:SavePositionFromFrame(spellID)
 end
 
 -- Enable/disable mouse on all display frames (draggable while the panel is open).
+-- Enable mouse (= draggable) only on the selected display while forced; the rest
+-- stay visible but click-through so overlapping auras don't fight for the cursor.
+-- With no selection (e.g. the /ga preview back-door) every display is draggable.
+function D:ApplyInteractivity()
+  local sel = self.selectedID
+  local haveSel = sel ~= nil and self.frames[sel] ~= nil
+  for id, f in pairs(self.frames) do
+    f:EnableMouse((self.forced and (not haveSel or id == sel)) and true or false)
+  end
+end
+
 function D:SetInteractive(on)
-  for _, f in pairs(self.frames) do f:EnableMouse(on and true or false) end
+  self:ApplyInteractivity()
+end
+
+-- Panel selection changed → re-apply which single display is draggable.
+function D:SetSelectedDisplay(id)
+  self.selectedID = id
+  self:ApplyInteractivity()
 end
 
 -- Cooldown swipe (for cooldown-type displays). The game draws the sweep +
@@ -186,8 +211,10 @@ end
 function D:UpdateCooldown(spellID)
   local f = self.frames[spellID]
   if not f or not f.cd then return end
+  local cfg = self:Config(spellID)
+  local sid = (cfg and cfg.spellID) or spellID
   pcall(function()
-    local info = C_Spell and C_Spell.GetSpellCooldown and C_Spell.GetSpellCooldown(spellID)
+    local info = C_Spell and C_Spell.GetSpellCooldown and C_Spell.GetSpellCooldown(sid)
     if not info then return end
     -- Cooldown setters are "AllowedWhenUntainted": an addon may pass PLAIN values
     -- (out of combat) but NOT secret ones (in combat) — that throws. So only draw

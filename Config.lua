@@ -29,7 +29,7 @@ local triggerFrame, triggerEditID, triggerTitle, triggerLogicBtn
 local rows, triggerRows = {}, {}
 
 local listFrame, listRows, listData, listOffset = nil, {}, {}, 0
-local LIST_ROWS = 18   -- one fewer row to make room for the Remove button under Add
+local LIST_ROWS = 17   -- leave room for the Add / Duplicate / Remove button stack
 local LIST_ROW_H = 24
 
 -- Texture blend modes (SetBlendMode) + friendly labels; frame strata choices.
@@ -150,14 +150,40 @@ local function DB() return GA.db and GA.db.displays end
 local function DisplayList()
   local out = {}
   local db = DB()
-  if db then for sid in pairs(db) do out[#out + 1] = sid end end
-  table.sort(out)
+  if db then for id in pairs(db) do out[#out + 1] = id end end
+  -- Keys are a spellID (number) for the original of a spell, or a "dN" string for a
+  -- duplicate. Sort by tracked spell then by key so number/string keys never compare
+  -- directly (that would error) and duplicates group under their source spell.
+  table.sort(out, function(a, b)
+    local sa = (db and db[a] and db[a].spellID) or 0
+    local sb = (db and db[b] and db[b].spellID) or 0
+    if sa ~= sb then return sa < sb end
+    return tostring(a) < tostring(b)
+  end)
   return out
 end
 
 local function Cfg()
   local db = DB()
   return db and selectedID and db[selectedID]
+end
+
+-- Deep-copy a display's config (nested tables: point, color, trigger, visibility, sound).
+local function DeepCopy(t)
+  if type(t) ~= "table" then return t end
+  local o = {}
+  for k, v in pairs(t) do o[k] = DeepCopy(v) end
+  return o
+end
+
+-- A fresh, unique display id — a "dN" STRING so it never collides with a numeric
+-- spellID key (originals stay keyed by their spellID; duplicates get these).
+local function NewDisplayID()
+  local db = GA.db
+  db.seq = (db.seq or 0) + 1
+  local id = "d" .. db.seq
+  while DB() and DB()[id] ~= nil do db.seq = db.seq + 1; id = "d" .. db.seq end
+  return id
 end
 
 local function ReapplySelected()
@@ -359,8 +385,8 @@ local function RefreshList()
     local sid = listData[i + listOffset]
     if sid then
       local cfg = DB() and DB()[sid]
-      row.spellID = sid
-      local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(sid)
+      row.spellID = sid   -- the display id (what SetSelected + the frame are keyed by)
+      local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture((cfg and cfg.spellID) or sid)
       row.icon:SetTexture(icon or 134400)
       row.name:SetText((cfg and cfg.label) or ("Spell " .. sid))
       local dim = cfg and cfg.enabled == false
@@ -379,6 +405,7 @@ end
 -- --------------------------------------------------------------------------
 local function SetSelected(sid)
   selectedID = sid
+  if GA.Displays then GA.Displays:SetSelectedDisplay(sid) end  -- only this one is draggable
   local cfg = Cfg()
   if editorName then editorName:SetText(cfg and (cfg.label or tostring(sid)) or "|cff888888No aura selected — add one on the left|r") end
   if triggerSummary then triggerSummary:SetText(cfg and SummaryText(cfg) or "") end
@@ -1220,11 +1247,27 @@ local function Build()
     listRows[i] = row
   end
 
+  -- Button stack at the bottom of the left pane: Add / Duplicate / Remove.
   local addBtn = flatButton(listFrame, LIST_W, 26, COLOR.purple, "+ Add Aura", 13)
-  addBtn:SetPoint("BOTTOMLEFT", 0, 28)
+  addBtn:SetPoint("BOTTOMLEFT", 0, 56)
   addBtn:SetScript("OnClick", function() OpenPicker() end)
 
-  -- Remove the selected aura — sits directly under "+ Add aura".
+  -- Duplicate: an exact copy of the selected aura (same tracked spell), nudged so
+  -- it doesn't sit exactly on top of the original. New display gets a unique id.
+  local dupBtn = flatButton(listFrame, LIST_W, 26, COLOR.heroic, "Duplicate Aura", 13)
+  dupBtn:SetPoint("BOTTOMLEFT", 0, 28)
+  dupBtn:SetScript("OnClick", function()
+    if not (selectedID and DB() and DB()[selectedID]) then return end
+    local copy = DeepCopy(DB()[selectedID])
+    copy.label = (copy.label or "Aura") .. " (copy)"
+    local p = copy.point or { "CENTER", 0, 0 }
+    copy.point = { "CENTER", (p[2] or 0) + 24, (p[3] or 0) - 24 }
+    local id = NewDisplayID()
+    DB()[id] = copy
+    if GA.CDM then GA.CDM:Discover() end
+    SetSelected(id)
+  end)
+
   local removeBtn = flatButton(listFrame, LIST_W, 26, COLOR.orange, "Remove This Aura", 13)
   removeBtn:SetPoint("BOTTOMLEFT", 0, 0)
   removeBtn:SetScript("OnClick", function()
@@ -1266,8 +1309,8 @@ local function Build()
     refresh = function()
       local c = Cfg()
       local tx = c and c.texture
-      if (not tx or tx == "") and selectedID and C_Spell and C_Spell.GetSpellTexture then
-        tx = C_Spell.GetSpellTexture(selectedID)
+      if (not tx or tx == "") and c and c.spellID and C_Spell and C_Spell.GetSpellTexture then
+        tx = C_Spell.GetSpellTexture(c.spellID)
       end
       preview:SetTexture(tx or 134400)
     end,
@@ -1433,7 +1476,7 @@ local function Build()
     SetSelected(selectedID or DisplayList()[1])
   end)
   p:SetScript("OnHide", function()
-    if GA.Displays then GA.Displays.forced = false; GA.Displays:SetInteractive(false) end
+    if GA.Displays then GA.Displays.forced = false; GA.Displays:SetSelectedDisplay(nil) end
     if GA.CDM and GA.CDM.Discover then GA.CDM:Discover() end
   end)
 
