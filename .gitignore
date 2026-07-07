@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# BigWigs packager output
+/.release/
+
+# Embedded libraries — fetched by the packager at release time (see .pkgmeta).
+# Present in the local working copy; kept out of the repo like GloomsBuildBarn.
+/Libs/
+
+# Local Claude Code settings (machine-specific)
+.claude/settings.local.json

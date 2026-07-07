@@ -1,0 +1,26 @@
+## Interface: 120007
+## Title: Gloom's Auras
+## Notes: Custom textures + sounds mirrored from the Blizzard Cooldown Manager. Midnight secret-safe.
+## Author: Gloom
+## Version: @project-version@
+## SavedVariables: GloomsAurasDB
+## IconTexture: Interface\AddOns\GloomsAuras\Media\minimap.png
+## X-Website: https://github.com/HandofDevastation/GloomsAuras
+
+# Embedded libraries — load FIRST. LibSharedMedia surfaces textures/fonts other
+# addons register (e.g. StoneTweaks' custom textures) into our picker; needs
+# LibStub + CallbackHandler first.
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
+Libs\LibSharedMedia-3.0\LibSharedMedia-3.0.lua
+
+# Load order: Core (namespace + slash router) → Displays (frames) → CDM (mirror
+# engine) → Config (options panel) → MinimapButton (LibDBIcon launcher).
+Core.lua
+Displays.lua
+CDM.lua
+Media\TextureManifest.lua
+Config.lua
+MinimapButton.lua

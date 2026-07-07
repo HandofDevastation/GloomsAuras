@@ -1,0 +1,23 @@
+# BigWigs packager config. Publishes to GitHub Releases (same model as GloomsBuildBarn).
+# WoWUp installs + auto-updates from those releases via the repo URL.
+
+package-as: GloomsAuras
+
+enable-nolib-creation: no
+
+# Embedded libraries. The packager fetches these into Libs/ at release build time
+# only — they are NOT committed to the repo (kept clean). Locally, Libs/ is present
+# in the working copy so everything works; MinimapButton.lua also self-falls-back.
+externals:
+  Libs/LibStub: https://repos.wowace.com/wow/libstub/trunk
+  Libs/CallbackHandler-1.0: https://repos.wowace.com/wow/callbackhandler/trunk/CallbackHandler-1.0
+  Libs/LibDataBroker-1.1: https://github.com/tekkub/libdatabroker-1-1
+  Libs/LibDBIcon-1.0: https://repos.wowace.com/wow/libdbicon-1-0/trunk/LibDBIcon-1.0
+  Libs/LibSharedMedia-3.0: https://repos.wowace.com/wow/libsharedmedia-3-0/trunk/LibSharedMedia-3.0
+
+# Keep repo-management files out of the packaged addon zip.
+ignore:
+  - README.md
+  - .github
+  - .gitignore
+  - .pkgmeta
