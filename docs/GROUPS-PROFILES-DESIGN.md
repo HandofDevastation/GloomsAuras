@@ -139,7 +139,11 @@ lands soonest; profiles wrap cleanly around it afterward.
   **Delete Group** (members fall back to Ungrouped). Skinned name dialog replaces StaticPopup.
   QA passed: spec load-rule gates the whole set bidirectionally (rule = non-current spec → hides;
   = current spec → shows), on/off switch hides/shows the set, all in combat on a dummy.
-- **Phase 2 — Grouped left pane.** Headers, collapse, nesting, Ungrouped section, group rename/delete/reorder, group load-rule button. QA: manage groups from the list.
+- **Phase 2 — Grouped left pane.** ✅ **BUILT + QA'd 2026-07-07.** Headers (custom triangle caret +
+  settings gear), collapse, nesting, Ungrouped section. Group management chosen as a **gear → docked
+  Manage Group drawer** (Jason's pick over inline buttons / right-pane): rename, load rule, on/off
+  switch, move up/down, delete. Aura editor reduced to the assign dropdown. **Also added (Jason
+  request): a per-aura eye toggle** (`hidden/unhidden.png`) toggling `cfg.enabled` from the row.
 - **Phase 3 — Profiles.** Schema-2 migration, `GA.global`/`GA.db` split, active-profile selection, profile switcher UI (switch/new/copy/rename/delete). QA: two profiles on one char; a second character defaults to its own; switching swaps the whole set.
 - Each phase is committed as a restore point before the next (as we've been doing).
 
