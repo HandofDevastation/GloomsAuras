@@ -162,9 +162,19 @@ local function SetupActiveProfile()
   local pkey = g.profileKeys[charKey] or charKey   -- default: this char's own profile
   if not g.profiles[pkey] then g.profiles[pkey] = NewProfile() end
   g.profileKeys[charKey] = pkey
-  SeedProfile(g.profiles[pkey])
+  local prof = g.profiles[pkey]
+  SeedProfile(prof)
+  -- One-time recovery (v2): re-enable every aura. Two reasons: (1) the eye icon used
+  -- to (mis)set cfg.enabled=false and now means "preview while editing" (cfg.preview);
+  -- (2) an early Disabled switch had a nil-idiom bug that could disable but never
+  -- re-enable, stranding auras off. Both are fixed; this un-sticks anything left off.
+  -- Visibility → Disabled is the intended way to turn an aura off going forward.
+  if prof._eyeFixed ~= 2 then
+    for _, cfg in pairs(prof.displays) do if cfg.enabled == false then cfg.enabled = nil end end
+    prof._eyeFixed = 2
+  end
   GA.activeProfile = pkey
-  GA.db = g.profiles[pkey]
+  GA.db = prof
 end
 GA.SetupActiveProfile = SetupActiveProfile
 

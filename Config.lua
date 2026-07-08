@@ -689,12 +689,13 @@ local function RefreshList()
       row.icon:SetTexture(icon)
       if row.eye then
         row.eye:Show()
-        local shown = not (cfg and cfg.enabled == false)
-        row.eye.icon:SetTexture(MEDIA .. (shown and "unhidden.png" or "hidden.png"))
+        -- Eye = show THIS aura on screen while the panel is open (editor preview only).
+        local prev = cfg and cfg.preview
+        row.eye.icon:SetTexture(MEDIA .. (prev and "unhidden.png" or "hidden.png"))
       end
       row.name:ClearAllPoints(); row.name:SetPoint("LEFT", 40, 0); row.name:SetPoint("RIGHT", -24, 0)
       row.name:SetText((cfg and cfg.label) or ("Spell " .. tostring(sid)))
-      local dim = cfg and cfg.enabled == false
+      local dim = cfg and cfg.enabled == false   -- disabled in-game (Visibility → Disabled) greys the row
       row.name:SetTextColor(dim and 0.5 or TEXT.r, dim and 0.5 or TEXT.g, dim and 0.5 or TEXT.b)
       row.sel:SetShown(sid == selectedID)
       row:Show()
@@ -741,7 +742,7 @@ local function SetSelected(sid)
   if C.RefreshTextEditor then C:RefreshTextEditor() end   -- text drawer follows selection (self-guards to when open)
   if C.RefreshGlowEditor then C:RefreshGlowEditor() end   -- glow drawer follows selection too
   RefreshList()
-  if GA.Displays and cfg then local f = GA.Displays:GetOrCreate(sid); if f then f:Show() end end
+  if GA.Displays then GA.Displays:RefreshForced() end   -- preview: show the selected + eye-on, hide the rest
 end
 
 -- --------------------------------------------------------------------------
@@ -1631,6 +1632,35 @@ local function BuildVisibilityEditor()
     local v = VE_Vis(); skBox:SetText(v and v.spellKnown and tostring(v.spellKnown) or ""); skRefreshName()
   end }
 
+  -- Master off-switch: DISABLE the aura in gameplay entirely (NOT a "show when"
+  -- condition, so it sits apart at the bottom). Auras only — groups have their own
+  -- on/off switch. ON = disabled (cfg.enabled=false → dropped from tracking, greyed).
+  local disDiv = f:CreateTexture(nil, "ARTWORK"); disDiv:SetColorTexture(COLOR.rim.r, COLOR.rim.g, COLOR.rim.b, COLOR.rim.a)
+  disDiv:SetPoint("TOPLEFT", 12, -368); disDiv:SetPoint("TOPRIGHT", -12, -368); disDiv:SetHeight(1)
+  local disLbl = newText(f, FONT.bodyM, 13, TEXT, "LEFT"); disLbl:SetPoint("TOPLEFT", 16, -384); disLbl:SetText("This aura in the game:")
+  -- Toggle: Disabled (left) | Enabled (right). Drives the AURA (cfg.enabled) or, when
+  -- editing a group's load rule, the GROUP (group.enabled). value true = right = Enabled.
+  local disSwitch = makeSwitch(f, "Disabled", "Enabled", function(v)
+    if visEditGroup then
+      local g = VE_Group(); if not g then return end
+      if v then g.enabled = nil else g.enabled = false end
+      if GA.CDM then GA.CDM:UpdateVisibilityPoll(); GA.CDM:RefreshDisplays() end
+      if C.RefreshGroupControl then C:RefreshGroupControl() end
+    else
+      local c = VE_Cfg(); if not c then return end
+      if v then c.enabled = nil else c.enabled = false end
+      if GA.CDM then GA.CDM:Discover() end     -- rebind the watch set
+    end
+    RefreshList()                              -- grey / ungrey the row(s)
+  end)
+  disSwitch:SetPoint("TOPLEFT", 236, -382)
+  veRows[#veRows + 1] = { refresh = function()
+    disDiv:Show(); disLbl:Show(); disSwitch:Show()
+    local t = visEditGroup and VE_Group() or VE_Cfg()
+    disLbl:SetText(visEditGroup and "This group in the game:" or "This aura in the game:")
+    disSwitch:Set(not (t and t.enabled == false))   -- Enabled unless explicitly disabled
+  end }
+
   local footer = newText(f, FONT.body, 11, MUTE, "CENTER"); footer:SetPoint("BOTTOM", 0, 10)
   footer:SetText("these AND with the display's Trigger")
   f:SetScript("OnHide", function()
@@ -2031,11 +2061,9 @@ function C:OnProfileSwitched()
   selectedID = nil
   if panel:IsShown() and GA.Displays then
     GA.Displays.forced = true
-    local db = DB()
-    if db then for sid, cfg in pairs(db) do if cfg.enabled ~= false then local fr = GA.Displays:GetOrCreate(sid); if fr then fr:Show() end end end end
     GA.Displays:SetInteractive(true)
   end
-  SetSelected(DisplayList()[1])   -- also refreshes the left list + editor
+  SetSelected(DisplayList()[1])   -- also refreshes the left list + editor (+ preview via RefreshForced)
   if C.RefreshGroupControl then C:RefreshGroupControl() end
   if self._hideCDM then self._hideCDM:Set(GA.db and GA.db.hideBlizzardCDM) end
   self:UpdateProfileButton()
@@ -2377,21 +2405,18 @@ local function Build()
     gicon:SetTexture(MEDIA .. "settings.png"); gicon:SetVertexColor(1, 1, 1, 1)
     gear:SetScript("OnClick", function() if row.gid then OpenGroupManager(row.gid) end end)
     gear:Hide(); row.gear = gear
-    -- Per-aura visibility toggle (aura rows only): Jason's eye icons — unhidden = shown,
-    -- hidden = disabled. Toggles cfg.enabled. Right edge of the aura row.
+    -- Per-aura EYE (aura rows only): Jason's eye icons — unhidden = previewed on
+    -- screen while the panel is open, hidden = not. Editor-only (cfg.preview); it does
+    -- NOT affect whether the aura runs in gameplay (that's Visibility → Disabled).
     local eye = flatButton(row, 18, 18, COLOR.purple, "", 12); eye:SetBase(0.0)
     eye:SetPoint("RIGHT", -3, 0)
     local eicon = eye:CreateTexture(nil, "OVERLAY"); eicon:SetSize(14, 14); eicon:SetPoint("CENTER")
     eicon:SetVertexColor(1, 1, 1, 1); eye.icon = eicon
     eye:SetScript("OnClick", function()
       if row.kind ~= "aura" or not row.id then return end
-      local id = row.id
-      local cfg = DB() and DB()[id]; if not cfg then return end
-      cfg.enabled = (cfg.enabled == false)     -- toggle: hidden→shown, shown→hidden
-      if GA.CDM then GA.CDM:Discover() end      -- rebind watch set + hide disabled frames
-      if GA.Displays and cfg.enabled ~= false and GA.Displays.forced then
-        local f = GA.Displays:GetOrCreate(id); if f then f:Show() end  -- re-show while panel open
-      end
+      local cfg = DB() and DB()[row.id]; if not cfg then return end
+      cfg.preview = (not cfg.preview) or nil     -- toggle on-screen editor preview
+      if GA.Displays then GA.Displays:RefreshForced() end
       RefreshList()
     end)
     eye:Hide(); row.eye = eye
@@ -2690,11 +2715,9 @@ local function Build()
     if pos then p:ClearAllPoints(); p:SetPoint("CENTER", UIParent, "CENTER", pos[1] or 0, pos[2] or 0) end
     if GA.Displays then
       GA.Displays.forced = true
-      local db = DB()
-      if db then for sid, cfg in pairs(db) do if cfg.enabled ~= false then local f = GA.Displays:GetOrCreate(sid); if f then f:Show() end end end end
       GA.Displays:SetInteractive(true)
     end
-    SetSelected(selectedID or DisplayList()[1])
+    SetSelected(selectedID or DisplayList()[1])   -- preview (selected + eye-on) via RefreshForced
   end)
   p:SetScript("OnHide", function()
     CloseSubWindows()   -- close any docked drawer so it doesn't linger/reappear

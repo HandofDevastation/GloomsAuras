@@ -488,6 +488,9 @@ function CDM:Discover()
   self:UpdateVisibilityPoll()  -- enable the visibility poll if any display uses it
   self:RefreshDisplays(true)   -- silent initial sync (no sound on reload)
   self:ApplyBlizzardHide()     -- re-assert the CDM-hide toggle after any re-pool
+  if GA.Displays and GA.Displays.forced and GA.Displays.RefreshForced then
+    GA.Displays:RefreshForced()  -- re-assert the editor preview (selected + eye-on) after re-pool
+  end
 end
 
 -- --------------------------------------------------------------------------

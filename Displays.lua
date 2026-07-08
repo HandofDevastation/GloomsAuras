@@ -278,6 +278,23 @@ function D:SetSelectedDisplay(id)
   self:ApplyInteractivity()
 end
 
+-- While the panel is open (forced) the on-screen preview shows ONLY the selected
+-- aura + any aura the user has 'eyed' on (cfg.preview) — so editing isn't buried
+-- under every aura at once. Purely an editor convenience; in-game (not forced) is
+-- unaffected, and cfg.preview has nothing to do with whether the aura runs.
+function D:RefreshForced()
+  if not self.forced then return end
+  local db = DB(); if not db then return end
+  local sel = self.selectedID
+  for id, cfg in pairs(db) do
+    if (id == sel) or cfg.preview then
+      local f = self:GetOrCreate(id); if f then f:Show() end
+    else
+      local f = self.frames[id]; if f then f:Hide() end
+    end
+  end
+end
+
 -- Cooldown swipe (for cooldown-type displays). The game draws the sweep +
 -- countdown from a possibly-secret duration; we never read the number.
 function D:SetCooldownEnabled(spellID, on)
