@@ -21,10 +21,11 @@ local function fillTooltip(tt)
   tt:AddLine("Left-click: open options", 0.8, 0.8, 0.8)
 end
 
--- LibDBIcon writes hide + minimapPos into GA.db.minimap.
+-- LibDBIcon writes hide + minimapPos into GA.global.minimap (account-wide, so the
+-- button placement/visibility is shared across characters — not per profile).
 local function ensureDB()
-  if not GA.db then return false end
-  GA.db.minimap = GA.db.minimap or {}
+  if not GA.global then return false end
+  GA.global.minimap = GA.global.minimap or {}
   return true
 end
 
@@ -40,7 +41,7 @@ local function registerBroker()
     OnClick = onClick,
     OnTooltipShow = fillTooltip,
   })
-  LDBIcon:Register(ADDON, dataObject, GA.db.minimap)
+  LDBIcon:Register(ADDON, dataObject, GA.global.minimap)
 end
 
 -- Self-contained fallback (used only if the libs are ever missing) ----------
@@ -61,7 +62,7 @@ local function onDragUpdate()
   px, py = px / scale, py / scale
   local angle = math.deg(math.atan2(py - my, px - mx))
   position(angle)
-  GA.db.minimap.minimapPos = angle
+  GA.global.minimap.minimapPos = angle
 end
 
 local function buildFallback()
@@ -96,7 +97,7 @@ local function buildFallback()
   end)
   btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-  position(GA.db.minimap.minimapPos or 200)
+  position(GA.global.minimap.minimapPos or 200)
 end
 
 -- Public API ---------------------------------------------------------------
@@ -110,22 +111,22 @@ function GA:InitMinimapButton()
   if not ensureDB() then return end
   if useLib() then
     if not dataObject then registerBroker() end
-    if GA.db.minimap.hide then LDBIcon:Hide(ADDON) else LDBIcon:Show(ADDON) end
+    if GA.global.minimap.hide then LDBIcon:Hide(ADDON) else LDBIcon:Show(ADDON) end
   else
     if btn then return end
-    if not GA.db.minimap.hide then buildFallback() end
+    if not GA.global.minimap.hide then buildFallback() end
   end
 end
 
 -- /ga minimap — toggle the button on/off (persisted). Returns shown state.
 function GA:ToggleMinimapButton()
   if not ensureDB() then return end
-  GA.db.minimap.hide = not GA.db.minimap.hide
+  GA.global.minimap.hide = not GA.global.minimap.hide
   if useLib() then
     if not dataObject then registerBroker() end
-    if GA.db.minimap.hide then LDBIcon:Hide(ADDON) else LDBIcon:Show(ADDON) end
+    if GA.global.minimap.hide then LDBIcon:Hide(ADDON) else LDBIcon:Show(ADDON) end
   else
-    if GA.db.minimap.hide then
+    if GA.global.minimap.hide then
       if btn then btn:Hide() end
     elseif btn then
       btn:Show()
@@ -133,5 +134,5 @@ function GA:ToggleMinimapButton()
       buildFallback()
     end
   end
-  return not GA.db.minimap.hide
+  return not GA.global.minimap.hide
 end

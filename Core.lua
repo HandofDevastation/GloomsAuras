@@ -82,28 +82,91 @@ GA.PreloadFonts = PreloadFonts
 
 -- ---------------------------------------------------------------------------
 -- Saved variables. Plain table, schema-versioned, never wiped on upgrade.
+--
+-- Schema 2 splits the SV into two layers (see docs/GROUPS-PROFILES-DESIGN.md §3):
+--   • GA.global = GloomsAurasDB — ACCOUNT-WIDE: profiles, profileKeys (char→profile
+--     name), minimap, panelPos.
+--   • GA.db     = the ACTIVE PROFILE — displays, groups, seq, groupSeq, hideBlizzardCDM,
+--     ungroupedCollapsed. GA.db is REPOINTED on a profile switch, so the many existing
+--     GA.db.displays / GA.db.groups call sites keep working untouched.
+-- Each character defaults to its own profile ("Name - Realm"); profiles are switchable
+-- and shareable across characters (Phase 3B adds the switcher UI).
 -- ---------------------------------------------------------------------------
-local DB_SCHEMA = 1
-local function InitDB()
-  if type(GloomsAurasDB) ~= "table" then GloomsAurasDB = {} end
-  local db = GloomsAurasDB
-  db.schema   = db.schema or DB_SCHEMA
-  db.displays = db.displays or {}   -- [spellID] = { spellID,label,enabled,size,point,... }
-  db.groups   = db.groups or {}     -- [groupID] = { id,name,order,enabled,visibility } (Phase 1)
-  db.groupSeq = db.groupSeq or 0    -- counter for "gN" group ids
-  db.media    = db.media or {}      -- reserved: custom media
-  db.minimap  = db.minimap or {}    -- LibDBIcon: { hide, minimapPos }
+local DB_SCHEMA = 2
 
-  -- Seed the Trick Shots proof display on a fresh DB so nothing regresses.
-  if next(db.displays) == nil then
-    db.displays[257621] = {
+-- Account-wide skeleton. Runs at ADDON_LOADED (SavedVariables are available then).
+-- Does NOT resolve the active profile yet — that needs the character name, which is
+-- only reliable at PLAYER_LOGIN (see SetupActiveProfile).
+local function InitGlobal()
+  if type(GloomsAurasDB) ~= "table" then GloomsAurasDB = {} end
+  local g = GloomsAurasDB
+  g.profiles    = g.profiles or {}     -- [profileName] = <profile>
+  g.profileKeys = g.profileKeys or {}  -- [charKey] = profileName
+  g.minimap     = g.minimap or {}      -- LibDBIcon: { hide, minimapPos } (account-wide)
+  -- g.panelPos is set lazily when the panel is first dragged (account-wide window pos).
+  GA.global = g
+end
+
+-- Per-character key used as the default profile name ("Name - Realm").
+local function CharKey()
+  local name  = UnitName("player") or "Unknown"
+  local realm = GetRealmName() or "Unknown"
+  return name .. " - " .. realm
+end
+GA.CharKey = CharKey
+
+local function NewProfile()
+  return { displays = {}, groups = {}, seq = 0, groupSeq = 0 }
+end
+GA.NewProfile = NewProfile
+
+-- Seed the Trick Shots proof display into an empty profile so nothing regresses.
+local function SeedProfile(profile)
+  if next(profile.displays) == nil then
+    profile.displays[257621] = {
       spellID = 257621, label = "Trick Shots", enabled = true,
       size = 64, point = { "CENTER", 0, 180 }, showLabel = true,
     }
   end
-
-  GA.db = db
 end
+
+-- One-time schema 1 → 2 migration, non-destructive. The old flat top-level
+-- displays/groups/seq/... become a profile named after the current character;
+-- values are read into the profile BEFORE the old keys are cleared, so no aura or
+-- group is lost. (Phase 1 shipped groups/groupSeq at the top level — they move too.)
+local function MigrateToProfiles(g, charKey)
+  local profile = NewProfile()
+  profile.displays           = g.displays or {}
+  profile.groups             = g.groups   or {}
+  profile.seq                = g.seq      or 0
+  profile.groupSeq           = g.groupSeq or 0
+  profile.hideBlizzardCDM    = g.hideBlizzardCDM
+  profile.ungroupedCollapsed = g.ungroupedCollapsed
+  g.profiles[charKey]    = profile
+  g.profileKeys[charKey] = charKey
+  -- clear the old flat keys now that they live in the profile
+  g.displays, g.groups, g.seq, g.groupSeq = nil, nil, nil, nil
+  g.hideBlizzardCDM, g.ungroupedCollapsed, g.media = nil, nil, nil
+  g.schema = 2
+end
+
+-- Resolve which profile this character uses and point GA.db at it. Runs at
+-- PLAYER_LOGIN (character name guaranteed available); migrates schema 1 → 2 first.
+local function SetupActiveProfile()
+  local g = GA.global
+  local charKey = CharKey()
+  if (g.schema or 1) < 2 and g.displays then
+    MigrateToProfiles(g, charKey)   -- flat → profiles, one time
+  end
+  g.schema = DB_SCHEMA
+  local pkey = g.profileKeys[charKey] or charKey   -- default: this char's own profile
+  if not g.profiles[pkey] then g.profiles[pkey] = NewProfile() end
+  g.profileKeys[charKey] = pkey
+  SeedProfile(g.profiles[pkey])
+  GA.activeProfile = pkey
+  GA.db = g.profiles[pkey]
+end
+GA.SetupActiveProfile = SetupActiveProfile
 
 -- ---------------------------------------------------------------------------
 -- Command helpers
@@ -248,8 +311,9 @@ boot:RegisterEvent("ADDON_LOADED")
 boot:RegisterEvent("PLAYER_LOGIN")
 boot:SetScript("OnEvent", function(_, event, arg1)
   if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
-    InitDB()
+    InitGlobal()
   elseif event == "PLAYER_LOGIN" then
+    SetupActiveProfile()   -- migrate schema 1→2 + point GA.db at the active profile, before anything reads it
     PreloadFonts()   -- warm bundled fonts before any panel is built (avoids blank labels)
     if GA.CDM and GA.CDM.Init then GA.CDM:Init() end
     if GA.InitMinimapButton then GA:InitMinimapButton() end

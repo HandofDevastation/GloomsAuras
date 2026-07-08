@@ -2289,7 +2289,7 @@ local function Build()
 
   p:SetScript("OnShow", function()
     hideCDM:Set(GA.db and GA.db.hideBlizzardCDM)
-    local pos = GA.db and GA.db.panelPos
+    local pos = GA.global and GA.global.panelPos
     if pos then p:ClearAllPoints(); p:SetPoint("CENTER", UIParent, "CENTER", pos[1] or 0, pos[2] or 0) end
     if GA.Displays then
       GA.Displays.forced = true
@@ -2316,11 +2316,11 @@ function C:RefreshCurrent()
 end
 
 function C:SavePanelPos()
-  if not panel or not GA.db then return end
+  if not panel or not GA.global then return end
   local px, py = panel:GetCenter()
   local ucx, ucy = UIParent:GetCenter()
   if px and ucx then
-    GA.db.panelPos = { math.floor(px - ucx + 0.5), math.floor(py - ucy + 0.5) }
+    GA.global.panelPos = { math.floor(px - ucx + 0.5), math.floor(py - ucy + 0.5) }
   end
 end
 
