@@ -89,6 +89,8 @@ local function InitDB()
   local db = GloomsAurasDB
   db.schema   = db.schema or DB_SCHEMA
   db.displays = db.displays or {}   -- [spellID] = { spellID,label,enabled,size,point,... }
+  db.groups   = db.groups or {}     -- [groupID] = { id,name,order,enabled,visibility } (Phase 1)
+  db.groupSeq = db.groupSeq or 0    -- counter for "gN" group ids
   db.media    = db.media or {}      -- reserved: custom media
   db.minimap  = db.minimap or {}    -- LibDBIcon: { hide, minimapPos }
 

@@ -60,7 +60,7 @@ local function DockRight(f)
 end
 
 local listFrame, listRows, listData, listOffset = nil, {}, {}, 0
-local LIST_ROWS = 17   -- leave room for the Add / Duplicate / Remove button stack
+local LIST_ROWS = 20   -- leave room for the Add / Duplicate / Remove button stack
 local LIST_ROW_H = 24
 
 -- Texture blend modes (SetBlendMode) + friendly labels; frame strata choices.
@@ -220,6 +220,99 @@ local function ReapplySelected()
   if GA.Displays and selectedID then GA.Displays:ApplyConfig(selectedID) end
 end
 
+-- --------------------------------------------------------------------------
+-- Groups (Phase 1): named buckets of auras carrying one load rule (a visibility
+-- table) + an on/off switch. Stored in GA.db.groups[groupID]; an aura joins via
+-- cfg.group. groupID = a "gN" string (own counter, never collides with display ids).
+-- --------------------------------------------------------------------------
+local function Groups() return GA.db and GA.db.groups end
+
+local function GroupList()   -- group ids sorted by order, then name
+  local out = {}
+  local g = Groups()
+  if g then for id in pairs(g) do out[#out + 1] = id end end
+  table.sort(out, function(a, b)
+    local ga, gb = g[a], g[b]
+    local oa, ob = ga.order or 0, gb.order or 0
+    if oa ~= ob then return oa < ob end
+    return tostring(ga.name or a) < tostring(gb.name or b)
+  end)
+  return out
+end
+
+local function NewGroupID()
+  local db = GA.db
+  db.groupSeq = (db.groupSeq or 0) + 1
+  local id = "g" .. db.groupSeq
+  while Groups() and Groups()[id] ~= nil do db.groupSeq = db.groupSeq + 1; id = "g" .. db.groupSeq end
+  return id
+end
+
+local function CreateGroup(name)
+  local g = Groups(); if not g then return nil end
+  local id = NewGroupID()
+  local maxOrder = -1
+  for _, grp in pairs(g) do maxOrder = math.max(maxOrder, grp.order or 0) end
+  g[id] = { id = id, name = (name and name ~= "" and name) or ("Group " .. id),
+            order = maxOrder + 1, enabled = true }
+  return id
+end
+
+-- Delete a group; its member auras fall back to Ungrouped (auras are never deleted —
+-- approved rule). Returns the group's name for a confirmation message.
+local function DeleteGroup(gid)
+  local g = Groups(); if not g or not g[gid] then return nil end
+  local name = g[gid].name or gid
+  local db = DB()
+  if db then for _, cfg in pairs(db) do if cfg.group == gid then cfg.group = nil end end end
+  g[gid] = nil
+  return name
+end
+
+-- Small skinned text-entry dialog (matches the panel) for naming a group. Reused
+-- for Phase 2 rename. Avoids StaticPopup (default chrome + its editBox/EditBox field
+-- name shifts between clients). onAccept(name) fires on OK / Enter.
+local nameDlgFrame, nameDlgBox, nameDlgTitle, nameDlgOnAccept
+
+local function BuildNameDialog()
+  local W, H = 300, 132
+  local f = CreateFrame("Frame", "GloomsAurasNameDialog", UIParent)
+  f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true)
+  skinPlate(f)
+  nameDlgTitle = newText(f, FONT.title, 17, COLOR.purple, "CENTER")
+  nameDlgTitle:SetPoint("TOP", 0, -14); nameDlgTitle:SetText("New Group")
+  nameDlgBox = flatEditBox(f, W - 48, 24); nameDlgBox:SetPoint("TOP", 0, -50)
+  local okB = flatButton(f, 100, 26, COLOR.purple, "OK", 13); okB:SetPoint("BOTTOMLEFT", 26, 16)
+  local cancelB = flatButton(f, 100, 26, COLOR.heroic, "Cancel", 13); cancelB:SetPoint("BOTTOMRIGHT", -26, 16)
+  local function accept()
+    local name = nameDlgBox:GetText()
+    local cb = nameDlgOnAccept; nameDlgOnAccept = nil
+    f:Hide()
+    if cb then cb(name) end
+  end
+  local function cancel() nameDlgOnAccept = nil; f:Hide() end
+  okB:SetScript("OnClick", accept)
+  cancelB:SetScript("OnClick", cancel)
+  nameDlgBox:SetScript("OnEnterPressed", accept)
+  nameDlgBox:SetScript("OnEscapePressed", cancel)
+  tinsert(UISpecialFrames, "GloomsAurasNameDialog")   -- ESC closes it
+  f:Hide()
+  nameDlgFrame = f
+  return f
+end
+
+local function OpenNameDialog(titleText, initial, onAccept)
+  if not nameDlgFrame then
+    local ok, err = pcall(BuildNameDialog)
+    if not ok then GA.msg("|cffff5555name dialog failed to build|r: " .. tostring(err)); return end
+  end
+  nameDlgOnAccept = onAccept
+  nameDlgTitle:SetText(titleText or "Name")
+  nameDlgBox:SetText(initial or ""); nameDlgBox:SetCursorPosition(0)
+  nameDlgFrame:Show(); nameDlgFrame:Raise()
+  nameDlgBox:SetFocus(); nameDlgBox:HighlightText()
+end
+
 local function SummaryText(cfg)
   local t = cfg and cfg.trigger
   if t and t.conditions and #t.conditions > 0 then
@@ -339,6 +432,64 @@ local function flatCheck(parent, label)
   function c:Get() return self._on end
   function c:Set(v) self._on = v and true or false; self.mark:SetShown(self._on) end
   return c
+end
+
+-- Binary sliding switch (matches GloomsBuildBarn's makeSwitch): [leftLabel]
+-- [track+knob] [rightLabel]. value=false→left, true→right; the selected label is
+-- accented (purple), the other dimmed, and the knob slides to that side. onChange(v)
+-- fires only on a USER toggle (not on :Set). :Set / :Refresh / :SetEnabled provided.
+local function makeSwitch(parent, leftText, rightText, onChange)
+  local s = CreateFrame("Frame", nil, parent)
+  s:SetSize(120, 22)
+  s.value = false
+
+  s.left = CreateFrame("Button", nil, s)
+  s.left.text = newText(s.left, FONT.label, 12, TEXT, "RIGHT")
+  s.left.text:SetText(leftText); s.left.text:SetAllPoints()
+  s.left:SetSize((s.left.text:GetStringWidth() or 20) + 2, 16)
+  s.left:SetPoint("LEFT", 0, 0)
+
+  s.track = CreateFrame("Button", nil, s)
+  s.track:SetSize(46, 20)
+  s.track:SetPoint("LEFT", s.left, "RIGHT", 10, 0)
+  s.track.fill = s.track:CreateTexture(nil, "BACKGROUND")
+  s.track.fill:SetAllPoints(); s.track.fill:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.16)
+  s.track.knob = s.track:CreateTexture(nil, "ARTWORK"); s.track.knob:SetSize(18, 14)
+  s.track.knob:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 1)
+
+  s.right = CreateFrame("Button", nil, s)
+  s.right.text = newText(s.right, FONT.label, 12, TEXT, "LEFT")
+  s.right.text:SetText(rightText); s.right.text:SetAllPoints()
+  s.right:SetSize((s.right.text:GetStringWidth() or 20) + 2, 16)
+  s.right:SetPoint("LEFT", s.track, "RIGHT", 10, 0)
+
+  local function refresh()
+    local k = s.track.knob
+    k:ClearAllPoints()
+    if s.value then k:SetPoint("RIGHT", -3, 0) else k:SetPoint("LEFT", 3, 0) end
+    local on, off = COLOR.purple, MUTE
+    if s.value then
+      s.left.text:SetTextColor(off.r, off.g, off.b);  s.right.text:SetTextColor(on.r, on.g, on.b)
+    else
+      s.left.text:SetTextColor(on.r, on.g, on.b);     s.right.text:SetTextColor(off.r, off.g, off.b)
+    end
+  end
+  local function set(v)
+    v = v and true or false
+    if s.value == v then return end
+    s.value = v; refresh(); if onChange then onChange(v) end
+  end
+  s.track:SetScript("OnClick", function() set(not s.value) end)
+  s.left:SetScript("OnClick", function() set(false) end)
+  s.right:SetScript("OnClick", function() set(true) end)
+  function s:Set(v) s.value = v and true or false; refresh() end
+  function s:Refresh() refresh() end
+  function s:SetEnabled(on)
+    s.track:SetEnabled(on); s.left:SetEnabled(on); s.right:SetEnabled(on)
+    s:SetAlpha(on and 1 or 0.4)
+  end
+  refresh()
+  return s
 end
 
 -- Colour-tint control: [✓ Tint] + a swatch. Clicking either opens the game
@@ -1143,15 +1294,29 @@ end
 -- Visibility editor: player/game-state conditions that gate the display (they
 -- AND with the Trigger). "Show only when ALL of these are true."
 -- --------------------------------------------------------------------------
-local visFrame, visEditID, visTitle
+-- The visibility editor edits ONE of: an aura (visEditID) or a group's load rule
+-- (visEditGroup). Exactly one is set at a time; VE_Vis returns the right table so
+-- every control below is identical for both. (Group load rule = the same design.)
+local visFrame, visEditID, visEditGroup, visTitle
 local veRows = {}
 
 local function VE_Cfg() return visEditID and DB() and DB()[visEditID] end
-local function VE_Vis() local c = VE_Cfg(); if not c then return nil end; c.visibility = c.visibility or {}; return c.visibility end
+local function VE_Group() return visEditGroup and Groups() and Groups()[visEditGroup] end
+local function VE_Vis()
+  if visEditGroup then
+    local g = VE_Group(); if not g then return nil end
+    g.visibility = g.visibility or {}; return g.visibility
+  end
+  local c = VE_Cfg(); if not c then return nil end
+  c.visibility = c.visibility or {}; return c.visibility
+end
 
 local function VE_Changed()
   if GA.CDM then GA.CDM:UpdateVisibilityPoll(); GA.CDM:RefreshDisplays() end
-  if visibilitySummary and visEditID == selectedID then visibilitySummary:SetText(VisibilitySummary(VE_Cfg())) end
+  if not visEditGroup and visibilitySummary and visEditID == selectedID then
+    visibilitySummary:SetText(VisibilitySummary(VE_Cfg()))
+  end
+  if visEditGroup and C.RefreshGroupControl then C:RefreshGroupControl() end
 end
 
 local function PlayerSpecs()
@@ -1261,7 +1426,10 @@ local function BuildVisibilityEditor()
   local footer = newText(f, FONT.body, 11, MUTE, "CENTER"); footer:SetPoint("BOTTOM", 0, 10)
   footer:SetText("these AND with the display's Trigger")
   f:SetScript("OnHide", function()
-    if visibilitySummary and visEditID == selectedID then visibilitySummary:SetText(VisibilitySummary(VE_Cfg())) end
+    if not visEditGroup and visibilitySummary and visEditID == selectedID then
+      visibilitySummary:SetText(VisibilitySummary(VE_Cfg()))
+    end
+    if visEditGroup and C.RefreshGroupControl then C:RefreshGroupControl() end
   end)
   tinsert(UISpecialFrames, "GloomsAurasVisibility")
   f:Hide()
@@ -1269,31 +1437,43 @@ local function BuildVisibilityEditor()
   return f
 end
 
-local function OpenVisibilityEditor(spellID)
-  if not spellID then return end
-  visEditID = spellID
+local function ShowVisibilityEditor(titleText)
   if not visFrame then
     local ok, err = pcall(BuildVisibilityEditor)
     if not ok then GA.msg("|cffff5555visibility editor failed to build|r: " .. tostring(err)); return end
   end
-  local c = VE_Cfg(); if c then c.visibility = c.visibility or {} end
-  if visTitle then visTitle:SetText("Visibility: " .. ((c and c.label) or tostring(spellID))) end
+  if visTitle then visTitle:SetText(titleText) end
   for _, r in ipairs(veRows) do r:refresh() end
   CloseSubWindows(visFrame)
   DockRight(visFrame)
   visFrame:Show(); visFrame:Raise()
 end
 
+local function OpenVisibilityEditor(spellID)
+  if not spellID then return end
+  visEditID = spellID; visEditGroup = nil
+  local c = VE_Cfg(); if c then c.visibility = c.visibility or {} end
+  ShowVisibilityEditor("Visibility: " .. ((c and c.label) or tostring(spellID)))
+end
+
+-- Same editor, targeting a group's load rule instead of an aura's visibility.
+local function OpenGroupVisibilityEditor(groupID)
+  if not groupID then return end
+  visEditGroup = groupID; visEditID = nil
+  local g = VE_Group(); if g then g.visibility = g.visibility or {} end
+  ShowVisibilityEditor("Group Rule: " .. ((g and g.name) or tostring(groupID)))
+end
+
 -- --------------------------------------------------------------------------
 -- Build the main panel (two-pane: aura list | settings editor).
 -- --------------------------------------------------------------------------
-local PANEL_W, PANEL_H = 580, 628
+local PANEL_W, PANEL_H = 580, 704
 local INSET, TITLEBAR_H = 14, 32
 local CONTENT_TOP = -(TITLEBAR_H + 8)   -- -40
 local LIST_W = 160
 local EDITOR_X = INSET + LIST_W + 16     -- 190
 local EDITOR_W = PANEL_W - EDITOR_X - INSET  -- 376
-local PANE_H = 524
+local PANE_H = 600
 
 local function Build()
   local p = CreateFrame("Frame", "GloomsAurasConfig", UIParent)
@@ -1529,6 +1709,121 @@ local function Build()
   rows[#rows + 1] = {
     refresh = function() soundBtn:SetText(soundLabel()) end,
     setEnabled = function(_, on) soundBtn:SetEnabled(on); testBtn:SetEnabled(on) end,
+  }
+
+  -- ---- GROUP (Phase 1): assign this aura to a group + reach its load rule ----
+  -- A group carries one load rule (Visibility) + an on/off switch that gate ALL its
+  -- auras at once. The dropdown assigns this aura; "Load Rule…" edits the group's
+  -- rule; "Group on" toggles the whole group. (Grouped left pane comes in Phase 2.)
+  Header(editor, 12, -488, "Group")
+
+  -- currentGroup(): the selected aura's group id + group table (defined first so the
+  -- switch's onChange closure can capture it).
+  local function currentGroup()
+    local c = Cfg(); local gid = c and c.group
+    return gid, gid and Groups() and Groups()[gid] or nil
+  end
+
+  -- Row 1: assignment dropdown + the whole-group OFF/ON switch (GloomsBuildBarn style).
+  local groupBtn = flatButton(editor, 150, 22, COLOR.heroic, "Ungrouped", 12)
+  groupBtn:SetPoint("TOPLEFT", 16, -512)
+  local groupOn = makeSwitch(editor, "OFF", "ON", function(v)
+    local _, g = currentGroup(); if not g then return end
+    g.enabled = v            -- v=true → group on, v=false → group off (auras hidden)
+    if GA.CDM then GA.CDM:UpdateVisibilityPoll(); GA.CDM:RefreshDisplays() end
+  end)
+  groupOn:SetPoint("LEFT", groupBtn, "RIGHT", 18, 0)
+  -- Row 2: the group's load rule + delete (auras fall back to Ungrouped).
+  local groupRuleBtn = flatButton(editor, 130, 22, COLOR.heroic, "Load Rule…", 12)
+  groupRuleBtn:SetPoint("TOPLEFT", 16, -540)
+  local groupDelBtn = flatButton(editor, 130, 22, COLOR.orange, "Delete Group", 12)
+  groupDelBtn:SetPoint("LEFT", groupRuleBtn, "RIGHT", 8, 0)
+
+  -- Dropdown menu (rebuilt on each open from the live group list). Opens UPWARD —
+  -- the section sits near the panel bottom — with a pooled set of item buttons.
+  local groupMenu = CreateFrame("Frame", nil, editor)
+  groupMenu:SetFrameLevel((editor:GetFrameLevel() or 1) + 40)
+  skinPlate(groupMenu)
+  groupMenu:SetPoint("BOTTOMLEFT", groupBtn, "TOPLEFT", 0, 2)
+  groupMenu:Hide()
+  local groupMenuItems = {}
+
+  local function refreshGroupControl()
+    local c = Cfg()
+    local _, g = currentGroup()
+    groupBtn:SetText(g and g.name or "Ungrouped")
+    groupBtn:SetEnabled(c ~= nil)
+    groupRuleBtn:SetEnabled(c ~= nil and g ~= nil)
+    groupDelBtn:SetEnabled(c ~= nil and g ~= nil)
+    groupOn:SetEnabled(c ~= nil and g ~= nil)
+    groupOn:Set(g ~= nil and g.enabled ~= false)
+  end
+  C.RefreshGroupControl = function() refreshGroupControl() end
+
+  local function assignGroup(gid)
+    local c = Cfg(); if not c then return end
+    c.group = gid            -- nil = ungrouped
+    refreshGroupControl()
+    if GA.CDM then GA.CDM:UpdateVisibilityPoll(); GA.CDM:RefreshDisplays() end
+  end
+
+  local function rebuildGroupMenu()
+    local entries = { { label = "Ungrouped", act = "clear" } }
+    for _, id in ipairs(GroupList()) do
+      entries[#entries + 1] = { label = Groups()[id].name or id, act = id }
+    end
+    entries[#entries + 1] = { label = "|cff936bff+ New Group…|r", act = "new" }
+    local W = 150
+    for i, e in ipairs(entries) do
+      local it = groupMenuItems[i]
+      if not it then
+        it = flatButton(groupMenu, W - 8, 20, COLOR.heroic, "", 12); it:SetBase(0.12)
+        groupMenuItems[i] = it
+      end
+      it:ClearAllPoints(); it:SetPoint("TOPLEFT", 4, -4 - (i - 1) * 22)
+      it:SetText(e.label)
+      it._act = e.act
+      it:SetScript("OnClick", function(self)
+        groupMenu:Hide(); openDropdownMenu = nil
+        local act = self._act
+        if act == "new" then
+          OpenNameDialog("New Group", nil, function(name) assignGroup(CreateGroup(name)) end)
+        elseif act == "clear" then
+          assignGroup(nil)
+        else
+          assignGroup(act)
+        end
+      end)
+      it:Show()
+    end
+    for i = #entries + 1, #groupMenuItems do groupMenuItems[i]:Hide() end
+    groupMenu:SetSize(W, #entries * 22 + 8)
+  end
+
+  groupBtn:SetScript("OnClick", function()
+    if groupMenu:IsShown() then groupMenu:Hide(); openDropdownMenu = nil
+    else
+      if openDropdownMenu and openDropdownMenu ~= groupMenu then openDropdownMenu:Hide() end
+      rebuildGroupMenu()
+      groupMenu:Show(); openDropdownMenu = groupMenu
+    end
+  end)
+  groupRuleBtn:SetScript("OnClick", function()
+    local gid = (currentGroup())
+    if gid then OpenGroupVisibilityEditor(gid) end
+  end)
+  groupDelBtn:SetScript("OnClick", function()
+    local gid, g = currentGroup(); if not g then return end
+    local name = DeleteGroup(gid)
+    if name then GA.msg(("deleted group |cffffffff%s|r — its auras moved to Ungrouped."):format(name)) end
+    if openDropdownMenu == groupMenu then groupMenu:Hide(); openDropdownMenu = nil end
+    refreshGroupControl()
+    if GA.CDM then GA.CDM:UpdateVisibilityPoll(); GA.CDM:RefreshDisplays() end
+  end)
+
+  rows[#rows + 1] = {
+    refresh = refreshGroupControl,
+    setEnabled = function(_, on) if not on then groupMenu:Hide() end end,  -- refresh handles enable state
   }
 
   -- (Remove button lives under "+ Add aura" in the left pane — see below.)

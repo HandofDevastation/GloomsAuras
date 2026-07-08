@@ -148,7 +148,28 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
     `Discover` re-syncs. ✅ QA'd — no sound on EM enter OR exit.
   - ✅ **QA'd**: the panel checkbox reflects/toggles state; persists across `/reload`.
 
+- ✅ **QA'd 2026-07-07 — Groups Phase 1 (data + engine)** — auras can be bucketed into named
+  **groups**, each carrying one **load rule** (a `visibility` table) + an **OFF/ON switch** that
+  gate ALL the group's auras at once, ANDed **in front of** each aura's own visibility+trigger.
+  Engine: `CDM:GroupGate(cfg)` (reuses `VisibilityGate` on `group.visibility` — zero new logic,
+  no secret data) called first in `EvalDisplay`; `UpdateVisibilityPoll` also turns on for a live
+  group rule. UI: new **GROUP** section in the aura editor — group dropdown (assign / "+ New
+  Group…"), **Load Rule…** (opens the now group-aware Visibility editor via `OpenGroupVisibilityEditor`),
+  an OFF/ON **switch** (`makeSwitch`, ported from GloomsBuildBarn — Jason prefers sliding switches
+  over checkboxes for on/off), and **Delete Group** (members fall back to Ungrouped; auras never
+  deleted). Group naming uses a **skinned** `OpenNameDialog` (NOT StaticPopup — see learning).
+  Data at `GA.db.groups[gid]` + `db.groupSeq` (top level under schema 1; **Phase 3 migration must
+  move them into the profile** — noted in the design doc). Panel grew (628→704h, LIST_ROWS 17→20)
+  to fit the section. **Gating only applies with the panel CLOSED** (auras are force-shown while
+  it's open — same as trigger/visibility), so QA it on a dummy in combat. QA passed: spec load-rule
+  gates the whole set both ways; on/off switch hides/shows the set; create/delete/name all clean.
+
 ## Hard-won LEARNINGS (verified — do NOT rediscover)
+- **StaticPopup edit box is `dialog.EditBox` (PascalCase) in Midnight, NOT `dialog.editBox`** — the
+  lowercase alias is GONE (GameDialog.xml system), so `OnShow`/`OnAccept` referencing `self.editBox`
+  throw `attempt to index field 'editBox' (a nil value)`. We sidestepped StaticPopup entirely with a
+  small **skinned** `OpenNameDialog` (flatEditBox + OK/Cancel) — nicer chrome AND no client-field
+  fragility. If StaticPopup is ever needed, use `dialog.EditBox or dialog.editBox`.
 - **1-charge spells are NORMAL cooldowns, not the "unreadable charge" wall (fixed 2026-07-07):**
   `cooldownInfo.charges` just means "uses the charge system". What matters is **maxCharges**:
   **1 ⇒ track like any cooldown** (Kill Shot, most executes); **≥2 ⇒ genuinely unreadable in combat**
@@ -242,8 +263,13 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   trigger = { logic="AND"|"OR", conditions = { { spellID, state, name }, ... } },
   visibility = { combat="in"|"out"|nil, target="has"|"none"|nil, casting/mounted/vehicle/
     instance/encounter/resting/stealthed/group/raid/warmode/alive = true/nil,
-    specs = { [specID]=true } or nil, spellKnown = spellID or nil } }
+    specs = { [specID]=true } or nil, spellKnown = spellID or nil },
+  group = <groupID> or nil }   -- Phase 1: which group this aura belongs to (nil = Ungrouped)
 ```
+`GloomsAurasDB.groups[<groupID>] = { id, name, order, enabled (false=off), visibility = <same
+shape as an aura's visibility> or nil }` and `GloomsAurasDB.groupSeq` (the "gN" id counter). A
+grouped aura shows only when its **group is on AND the group's load rule passes** — ANDed in
+front of the aura's own Visibility + Trigger. (Phase 3 moves `groups`/`groupSeq` into the profile.)
 `GloomsAurasDB.hideBlizzardCDM = true/nil` (global; hides the four Blizzard CDM viewers via alpha-0).
 `GloomsAurasDB.minimap = { hide, minimapPos }` (LibDBIcon). Display shows when its **Trigger**
 passes AND its **Visibility** gate passes (no visibility set ⇒ always eligible).
@@ -268,20 +294,23 @@ passes AND its **Visibility** gate passes (no visibility set ⇒ always eligible
 
 ## NEXT / pending
 
-### ▶▶ START HERE NEXT SESSION: Groups + Profiles (APPROVED, design done)
+### ▶▶ START HERE NEXT SESSION: Groups + Profiles — Phase 2 (Phase 1 DONE)
 **Read [docs/GROUPS-PROFILES-DESIGN.md](GROUPS-PROFILES-DESIGN.md) first — it is the spec.**
-Jason approved every recommendation, so all design decisions are RESOLVED (see §6 there). Build in
-phases, each its own QA gate + restore-point commit:
-- **Phase 1 — Groups data + engine** (start here): `profile.groups`, `cfg.group`, `CDM:GroupGate`
-  (group visibility ANDs in front of aura trigger+visibility — reuses `VisibilityGate`), poll hook.
-  Aura "Group" dropdown + a minimal "+ New Group". Group on/off toggle. QA: a "Marksmanship" group
-  whose load rule = spec, gating the whole set.
-- **Phase 2 — Grouped left pane** (headers/collapse/nesting/Ungrouped, rename/delete→auras-to-Ungrouped/
-  up-down reorder, group load-rule button).
-- **Phase 3 — Profiles** (schema-2 migration, `GA.global`/`GA.db`=active-profile split, switcher UI:
-  switch/new/copy/rename/delete; per-character default `"Name - Realm"`). Key trick: `GA.db` repoints to
-  the active profile so most existing `GA.db.displays` code is untouched; only `panelPos`+`minimap` move
-  to `GA.global`. `hideBlizzardCDM` stays in the profile.
+Jason approved every recommendation, so all design decisions are RESOLVED (see §6 there).
+- **Phase 1 — Groups data + engine.** ✅ **DONE + QA'd 2026-07-07** (see BUILT list above). Groups,
+  `cfg.group`, `CDM:GroupGate`, poll hook, editor GROUP section (dropdown + Load Rule… + OFF/ON switch
+  + Delete Group), skinned name dialog. Committed as the Phase-1 restore point.
+- **Phase 2 — Grouped left pane** (START HERE): the LEFT pane becomes group **headers** (name ·
+  collapse ▸/▾ · load-rule button · rename · delete) with each group's auras indented beneath, then an
+  **Ungrouped** section, then the Add/Duplicate/Remove stack. Rename (reuse `OpenNameDialog`), delete
+  (→ auras to Ungrouped, reuse `DeleteGroup`), up/down reorder (`group.order` already exists). The
+  editor's Group dropdown + Load Rule… + switch + Delete built in Phase 1 can move/mirror into the
+  header. QA: manage groups entirely from the list.
+- **Phase 3 — Profiles** (schema-2 migration — **must move `groups`+`groupSeq` into the profile**,
+  see design §3; `GA.global`/`GA.db`=active-profile split, switcher UI: switch/new/copy/rename/delete;
+  per-character default `"Name - Realm"`). Key trick: `GA.db` repoints to the active profile so most
+  existing `GA.db.displays` code is untouched; only `panelPos`+`minimap` move to `GA.global`.
+  `hideBlizzardCDM` stays in the profile.
 
 ### Other pending / deferred
 - **Override display polish (optional, offered, Jason didn't decide):** show a spell's **override** name+
@@ -299,7 +328,13 @@ phases, each its own QA gate + restore-point commit:
   walled), Precise Shots **260240** (buff), **Kill Shot 53351 → override Black Arrow 466930** (Black Arrow
   replaces Kill Shot; a **1-charge** cd — see the charge learning above; his working aura = "Precise Shots
   active AND Kill Shot cd_ready"). His SavedVariables has displays incl. Trick Shots, Rapid Fire, Kill Shot,
-  Aimed Shot, plus experiments.
+  Aimed Shot, plus experiments. He now also has a **"Marksmanship"** group (load rule = spec) with
+  Rapid Fire assigned, from Phase 1 QA.
+- **Session end 2026-07-07 (third session):** shipped **Groups Phase 1** — group data + `CDM:GroupGate`
+  engine, the editor **GROUP** section (assign dropdown + Load Rule… + OFF/ON `makeSwitch` + Delete
+  Group), a **skinned name dialog** (dodging the Midnight StaticPopup `EditBox` change), the panel grown
+  to fit. All QA'd on a dummy (spec load-rule + on/off both gate the whole set). No open bugs. **Next:
+  Phase 2 — grouped left pane.**
 - **Session end 2026-07-07 (second session):** shipped the **Hide-Blizzard-CDM toggle**, **aspect-ratio
   lock** (custom lock PNGs), **custom flat sliders**, **Duplicate Aura** (multi-per-spell via display-id
   re-key), **drag-selected-only**, **font preload** (first-login blank-label fix), a **UI-cleanup batch**

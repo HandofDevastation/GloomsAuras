@@ -89,10 +89,12 @@ AURA_CFG = { …all existing fields…, group = <groupID> or nil }   -- + one fi
 ### Migration (schema 1 → 2, non-destructive)
 On load, if `schema < 2` and a top-level `displays` exists:
 1. Create profile named after the current character (`"Name - Realm"`).
-2. Move `displays`, `seq`, `hideBlizzardCDM` into it; add empty `groups = {}`.
+2. Move `displays`, `groups`, `seq`, `groupSeq`, `hideBlizzardCDM` into it.
+   **(Phase 1 shipped `groups`/`groupSeq` at the TOP LEVEL under schema 1 — they must
+   move into the profile too, not be recreated empty, or existing groups are lost.)**
 3. `profileKeys[char] = that name`; leave `minimap`/`panelPos` at top level.
-4. Delete the old top-level `displays`/`seq`/`hideBlizzardCDM`; set `schema = 2`.
-Existing auras land in the new profile **Ungrouped** (their `group` is nil) — nothing lost.
+4. Delete those old top-level keys; set `schema = 2`.
+Existing auras land in the new profile with their `group` intact — nothing lost.
 
 ## 4. Engine changes (CDM.lua)
 
@@ -130,7 +132,13 @@ Generalize `OpenVisibilityEditor(target)` where `target` is an aura id **or** a 
 Designed together (this doc); **built** in value order — groups first so the spec-set need
 lands soonest; profiles wrap cleanly around it afterward.
 
-- **Phase 1 — Groups data + engine.** Add `groups`, `cfg.group`, `GroupGate`, poll hook. Aura "Group" dropdown + a minimal "+ New Group". QA: put auras in a group, set the group's rule to a spec, confirm the whole set shows/hides by spec.
+- **Phase 1 — Groups data + engine.** ✅ **BUILT + QA'd 2026-07-07.** `groups`, `cfg.group`,
+  `CDM:GroupGate` (on/off switch + load rule, ANDed in front of aura visibility+trigger), poll
+  hook. Editor GROUP section: group dropdown (assign / "+ New Group…"), **Load Rule…** (opens the
+  now group-aware Visibility editor), an OFF/ON **switch** (`makeSwitch`, Build-Barn style), and a
+  **Delete Group** (members fall back to Ungrouped). Skinned name dialog replaces StaticPopup.
+  QA passed: spec load-rule gates the whole set bidirectionally (rule = non-current spec → hides;
+  = current spec → shows), on/off switch hides/shows the set, all in combat on a dummy.
 - **Phase 2 — Grouped left pane.** Headers, collapse, nesting, Ungrouped section, group rename/delete/reorder, group load-rule button. QA: manage groups from the list.
 - **Phase 3 — Profiles.** Schema-2 migration, `GA.global`/`GA.db` split, active-profile selection, profile switcher UI (switch/new/copy/rename/delete). QA: two profiles on one char; a second character defaults to its own; switching swaps the whole set.
 - Each phase is committed as a restore point before the next (as we've been doing).

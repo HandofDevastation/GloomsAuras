@@ -206,14 +206,33 @@ function CDM:VisibilityGate(cfg)
   return true
 end
 
+-- Group gate: a display in a group inherits the group's on/off switch + load rule,
+-- ANDed IN FRONT of the display's own visibility + trigger. The group's load rule
+-- is just a `visibility` table, so VisibilityGate evaluates it with no new logic
+-- (all plain game APIs — no secret aura data). No group / missing group ⇒ pass.
+function CDM:GroupGate(cfg)
+  local gid = cfg and cfg.group
+  if not gid then return true end
+  local g = GA.db and GA.db.groups and GA.db.groups[gid]
+  if not g then return true end                 -- group deleted → treat as ungrouped
+  if g.enabled == false then return false end   -- whole group switched off
+  return self:VisibilityGate(g)                 -- reuse the visibility engine on g.visibility
+end
+
 -- A tiny throttled poll re-evaluates displays so visibility conditions (combat,
 -- target, casting, …) update live. Runs ONLY while some display uses visibility.
 function CDM:UpdateVisibilityPoll()
   local uses = false
   local db = GA.db and GA.db.displays
+  local groups = GA.db and GA.db.groups
   if db then
     for _, cfg in pairs(db) do
-      if cfg.enabled ~= false and HasVisibilityConstraints(cfg.visibility) then uses = true; break end
+      if cfg.enabled ~= false then
+        if HasVisibilityConstraints(cfg.visibility) then uses = true; break end
+        -- A group load rule (spec/combat/target/…) also needs the live poll.
+        local g = cfg.group and groups and groups[cfg.group]
+        if g and HasVisibilityConstraints(g.visibility) then uses = true; break end
+      end
     end
   end
   if not self._visFrame then
@@ -229,6 +248,7 @@ function CDM:UpdateVisibilityPoll()
 end
 
 function CDM:EvalDisplay(id, cfg)
+  if not self:GroupGate(cfg) then return false end       -- group on/off + load rule ANDs first
   if not self:VisibilityGate(cfg) then return false end  -- context gate ANDs with trigger
   local t = cfg.trigger
   if t and t.conditions and #t.conditions > 0 then
