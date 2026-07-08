@@ -139,6 +139,13 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   - ⏳ **Still to QA**: the panel checkbox reflects/toggles state; persistence across `/reload`.
 
 ## Hard-won LEARNINGS (verified — do NOT rediscover)
+- **Blank labels on the FIRST login of a session (2026-07-07):** WoW sometimes hasn't finished
+  loading a bundled runtime TTF when the panel is built on an early `/ga`, so *some* labels render
+  BLANK (button backgrounds fine, glyphs missing) until a `/reload` caches the font. `setFont`'s
+  fallback only catches an *invalid* path, not "valid path, glyphs not ready yet". Fix: `GA.PreloadFonts`
+  in Core.lua draws+measures a throwaway string in each `GA.FONT` face at `PLAYER_LOGIN`, warming the
+  cache before any panel builds. Only reproduces on a true fresh login (a `/reload` already has the
+  fonts cached), so verify by logging out to char-select and back in, then opening `/ga` immediately.
 - The frame method is **`StopMovingOrSizing`**, NOT `StopMovingAndSizing` (nonexistent). The
   typo made every drag "stick to the cursor." Cross-check method names against GloomsBuildBarn.
 - **Create frames HIDDEN** (`f:Hide()` at end of build) so the first `:Show()` actually

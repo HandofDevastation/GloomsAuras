@@ -28,6 +28,20 @@ local pickerFrame, pickerOnPick
 local triggerFrame, triggerEditID, triggerTitle, triggerLogicBtn
 local rows, triggerRows = {}, {}
 
+-- Pop-up editors (Trigger, Visibility, Sound, Texture, aura picker) are mutually
+-- exclusive so they don't stack on top of each other. Each registers here when built;
+-- opening one closes the rest, except any passed as `keep` (the aura picker opened
+-- from the Trigger editor keeps that editor open underneath it).
+local subWindows = {}
+local function RegisterSubWindow(f) subWindows[#subWindows + 1] = f end
+local function CloseSubWindows(...)
+  local keep = {}
+  for i = 1, select("#", ...) do local f = select(i, ...); if f then keep[f] = true end end
+  for _, f in ipairs(subWindows) do
+    if not keep[f] and f:IsShown() then f:Hide() end
+  end
+end
+
 local listFrame, listRows, listData, listOffset = nil, {}, {}, 0
 local LIST_ROWS = 17   -- leave room for the Add / Duplicate / Remove button stack
 local LIST_ROW_H = 24
@@ -35,7 +49,6 @@ local LIST_ROW_H = 24
 -- Texture blend modes (SetBlendMode) + friendly labels; frame strata choices.
 local BLEND_MODES = {
   { "BLEND", "Blend" }, { "ADD", "Add (glow)" }, { "MOD", "Modulate" },
-  { "ALPHAKEY", "Alpha Key" }, { "DISABLE", "Opaque" },
 }
 local STRATA_MODES = {
   { "LOW", "Low" }, { "MEDIUM", "Medium" }, { "HIGH", "High" },
@@ -98,9 +111,9 @@ local function flatEditBox(parent, w, h)
   e:SetTextInsets(6, 6, 0, 0)
   local bg = e:CreateTexture(nil, "BACKGROUND"); bg:SetAllPoints()
   bg:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.10)
-  local edges = addEdges(e, COLOR.rim, 1)
-  e:SetScript("OnEditFocusGained", function() edges:SetColor(COLOR.purple, 0.85) end)
-  e:SetScript("OnEditFocusLost", function() edges:SetColor(COLOR.rim) end)
+  -- No border (Jason's preference). Focus cue = brighten the fill instead.
+  e:SetScript("OnEditFocusGained", function() bg:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.22) end)
+  e:SetScript("OnEditFocusLost",  function() bg:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.10) end)
   return e
 end
 
@@ -121,7 +134,7 @@ local function flatButton(parent, w, h, cc, label, size)
   b._base, b._active = 0.55, false
   b.fill = b:CreateTexture(nil, "BACKGROUND")
   b.fill:SetAllPoints(); b.fill:SetColorTexture(cc.r, cc.g, cc.b, 1); b.fill:SetAlpha(b._base)
-  b.text = newText(b, FONT.label, size or 12, { r = 1, g = 1, b = 1 }, "CENTER")
+  b.text = newText(b, FONT.bodyM, size or 12, { r = 1, g = 1, b = 1 }, "CENTER")  -- lighter weight (Medium)
   b.text:SetPoint("CENTER")
   b:SetFontString(b.text)  -- wire the fontstring so b:SetText() updates it
   if label then b.text:SetText(label) end
@@ -279,11 +292,11 @@ local function MakeSlider(parent, yOff, label, minV, maxV, step, get, set)
 end
 
 -- Text row: label + wide entry box (used for the texture path).
-local function MakeText(parent, yOff, label, get, set)
+local function MakeText(parent, yOff, label, get, set, w)
   local title = newText(parent, FONT.body, 12, TEXT, "LEFT")
   title:SetPoint("TOPLEFT", 16, yOff); title:SetText(label)
 
-  local edit = flatEditBox(parent, 330, 20); edit:SetPoint("TOPLEFT", 22, yOff - 18)
+  local edit = flatEditBox(parent, w or 330, 20); edit:SetPoint("TOPLEFT", 22, yOff - 18)
   edit:SetScript("OnEnterPressed", function(self)
     local t = self:GetText(); if t == "" then t = nil end
     set(t); ReapplySelected(); self:ClearFocus()
@@ -367,6 +380,44 @@ local function MakeCycle(parent, x, yOff, w, prefix, values, get, set)
   local row = {}
   function row:refresh() b:SetText(label()) end
   function row:setEnabled(on) b:SetEnabled(on) end
+  return row
+end
+
+-- Proper dropdown menu (same signature as MakeCycle): a button showing the current
+-- value that opens a list of options below it. Only one dropdown menu is open at a
+-- time. values = { {storedValue, label}, ... }.
+local openDropdownMenu
+local function MakeDropdown(parent, x, yOff, w, prefix, values, get, set)
+  local b = flatButton(parent, w, 20, COLOR.heroic, "", 12)
+  b:SetPoint("TOPLEFT", x, yOff)
+  local function label()
+    local cur = get()
+    for _, v in ipairs(values) do if v[1] == cur then return prefix .. v[2] end end
+    return prefix .. values[1][2]
+  end
+  local menu = CreateFrame("Frame", nil, parent)
+  menu:SetSize(w, #values * 22 + 8)
+  menu:SetPoint("TOPLEFT", b, "BOTTOMLEFT", 0, -2)
+  menu:SetFrameLevel((parent:GetFrameLevel() or 1) + 20)  -- draw above the rows below
+  skinPlate(menu); menu:Hide()
+  for i, v in ipairs(values) do
+    local item = flatButton(menu, w - 8, 20, COLOR.heroic, v[2], 12); item:SetBase(0.12)
+    item:SetPoint("TOPLEFT", 4, -4 - (i - 1) * 22)
+    item:SetScript("OnClick", function()
+      menu:Hide(); openDropdownMenu = nil
+      set(v[1]); b:SetText(label()); ReapplySelected()
+    end)
+  end
+  b:SetScript("OnClick", function()
+    if menu:IsShown() then menu:Hide(); openDropdownMenu = nil
+    else
+      if openDropdownMenu and openDropdownMenu ~= menu then openDropdownMenu:Hide() end
+      menu:Show(); openDropdownMenu = menu
+    end
+  end)
+  local row = {}
+  function row:refresh() b:SetText(label()) end
+  function row:setEnabled(on) b:SetEnabled(on); if not on then menu:Hide() end end
   return row
 end
 
@@ -535,7 +586,7 @@ local function BuildPicker()
   f:SetScript("OnShow", function() pickerData = BuildAuraList(); pickerOffset = 0; RefreshPicker() end)
   tinsert(UISpecialFrames, "GloomsAurasPicker")
   f:Hide()  -- created hidden so the first OpenPicker transitions + fires OnShow
-  pickerFrame = f
+  pickerFrame = f; RegisterSubWindow(f)
   return f
 end
 
@@ -545,7 +596,9 @@ local function OpenPicker(onPick)
     local ok, err = pcall(BuildPicker)
     if not ok then GA.msg("|cffff5555aura picker failed to build|r: " .. tostring(err)); return end
   end
-  pickerFrame:Show()
+  -- Picked FROM the Trigger editor (onPick set) → keep it open underneath.
+  CloseSubWindows(pickerFrame, onPick and triggerFrame or nil)
+  pickerFrame:Show(); pickerFrame:Raise()
 end
 
 -- --------------------------------------------------------------------------
@@ -556,7 +609,7 @@ end
 -- --------------------------------------------------------------------------
 local LSM = LibStub and LibStub("LibSharedMedia-3.0", true)
 
-local texPickerFrame, texPickerOnPick, texCatButton, texCatMenu, texSearchBox
+local texPickerFrame, texPickerOnPick, texCatButton, texCatMenu, texSearchBox, texSearchLabel
 local texCells, texData, texOffset, texCurrentCat, texCurrentTex = {}, {}, 0, nil, nil
 local TEX_COLS, TEX_ROWS, TEX_CELL = 6, 5, 58
 local TEX_PER = TEX_COLS * TEX_ROWS
@@ -618,7 +671,10 @@ if GA.TextureShapes then
       searchable = true, cache = true, provider = function() return items end }
   end
 end
-TEX_CATS[#TEX_CATS + 1] = { key = "icons",       label = "Game Icons",           provider = CatGameIcons,   searchable = false, cache = true }
+-- Game icons come from the client as fileIDs with NO names, so a name search can't
+-- work. Instead the search box becomes a "Spell ID" lookup: type a spell ID to show
+-- that spell's icon. Empty box = browse the full grid.
+TEX_CATS[#TEX_CATS + 1] = { key = "icons",       label = "Game Icons",           provider = CatGameIcons,   searchMode = "spellid", cache = true }
 TEX_CATS[#TEX_CATS + 1] = { key = "stonetweaks", label = "StoneTweaks Graphics",  provider = CatStoneTweaks, searchable = true }
 TEX_CATS[#TEX_CATS + 1] = { key = "lsm",         label = "Shared Media (bars)",   provider = CatLSM,         searchable = true }
 
@@ -660,11 +716,21 @@ local function RebuildTexData()
   local cat = TexCat(texCurrentCat)
   local all = catItems(cat)
   local q = texSearchBox and texSearchBox:GetText()
-  q = (q and q ~= "") and q:lower() or nil
-  if cat.searchable and q then
+  q = (q and q ~= "") and q or nil
+  if cat.searchMode == "spellid" then
+    -- Type a spell ID → show that spell's icon; empty = browse all game icons.
+    if q then
+      local id = tonumber(q)
+      local tx = id and C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(id)
+      texData = tx and { { tex = tx, name = "" } } or {}
+    else
+      texData = all
+    end
+  elseif cat.searchable and q then
+    local ql = q:lower()
     texData = {}
     for _, it in ipairs(all) do
-      if it.name and it.name:lower():find(q, 1, true) then texData[#texData + 1] = it end
+      if it.name and it.name:lower():find(ql, 1, true) then texData[#texData + 1] = it end
     end
   else
     texData = all
@@ -675,8 +741,10 @@ end
 
 local function SetTexCat(key)
   texCurrentCat = key
-  if texCatButton then texCatButton:SetText(TexCat(key).label) end
+  local cat = TexCat(key)
+  if texCatButton then texCatButton:SetText(cat.label) end
   if texSearchBox then texSearchBox:SetText("") end
+  if texSearchLabel then texSearchLabel:SetText(cat.searchMode == "spellid" and "Spell ID" or "Search") end
   RebuildTexData()
 end
 
@@ -755,7 +823,7 @@ local function BuildTexturePicker()
   f:SetScript("OnMouseWheel", function(_, d) texOffset = texOffset - d * TEX_COLS; RefreshTexGrid() end)
   tinsert(UISpecialFrames, "GloomsAurasTexPicker")
   f:Hide()
-  texPickerFrame = f
+  texPickerFrame = f; RegisterSubWindow(f)
   return f
 end
 
@@ -768,7 +836,8 @@ local function OpenTexturePicker(onPick, current)
   end
   if texCatMenu then texCatMenu:Hide() end
   SetTexCat(texCurrentCat or DEFAULT_TEX_CAT)
-  texPickerFrame:Show()
+  CloseSubWindows(texPickerFrame)
+  texPickerFrame:Show(); texPickerFrame:Raise()
 end
 
 -- --------------------------------------------------------------------------
@@ -914,7 +983,7 @@ local function BuildSoundPicker()
   f:SetScript("OnMouseWheel", function(_, d) soundOffset = soundOffset - d; RefreshSoundList() end)
   tinsert(UISpecialFrames, "GloomsAurasSoundPicker")
   f:Hide()
-  soundPickerFrame = f
+  soundPickerFrame = f; RegisterSubWindow(f)
   return f
 end
 
@@ -928,7 +997,8 @@ local function OpenSoundPicker(onPick, current)
   end
   if soundSearchBox then soundSearchBox:SetText("") end
   RebuildSoundData()
-  soundPickerFrame:Show()
+  CloseSubWindows(soundPickerFrame)
+  soundPickerFrame:Show(); soundPickerFrame:Raise()
 end
 
 -- --------------------------------------------------------------------------
@@ -1031,7 +1101,7 @@ local function BuildTriggerEditor()
   f:SetScript("OnShow", RefreshTrigger)
   tinsert(UISpecialFrames, "GloomsAurasTrigger")
   f:Hide()
-  triggerFrame = f
+  triggerFrame = f; RegisterSubWindow(f)
   return f
 end
 
@@ -1043,7 +1113,8 @@ local function OpenTriggerEditor(spellID)
     if not ok then GA.msg("|cffff5555trigger editor failed to build|r: " .. tostring(err)); return end
   end
   RefreshTrigger()
-  triggerFrame:Show()
+  CloseSubWindows(triggerFrame)
+  triggerFrame:Show(); triggerFrame:Raise()
 end
 
 -- --------------------------------------------------------------------------
@@ -1172,7 +1243,7 @@ local function BuildVisibilityEditor()
   end)
   tinsert(UISpecialFrames, "GloomsAurasVisibility")
   f:Hide()
-  visFrame = f
+  visFrame = f; RegisterSubWindow(f)
   return f
 end
 
@@ -1186,7 +1257,8 @@ local function OpenVisibilityEditor(spellID)
   local c = VE_Cfg(); if c then c.visibility = c.visibility or {} end
   if visTitle then visTitle:SetText("Visibility: " .. ((c and c.label) or tostring(spellID))) end
   for _, r in ipairs(veRows) do r:refresh() end
-  visFrame:Show()
+  CloseSubWindows(visFrame)
+  visFrame:Show(); visFrame:Raise()
 end
 
 -- --------------------------------------------------------------------------
@@ -1268,7 +1340,7 @@ local function Build()
     SetSelected(id)
   end)
 
-  local removeBtn = flatButton(listFrame, LIST_W, 26, COLOR.orange, "Remove This Aura", 13)
+  local removeBtn = flatButton(listFrame, LIST_W, 26, COLOR.orange, "Remove Aura", 13)
   removeBtn:SetPoint("BOTTOMLEFT", 0, 0)
   removeBtn:SetScript("OnClick", function()
     if selectedID and DB() then
@@ -1288,34 +1360,23 @@ local function Build()
   editorName:SetPoint("TOPLEFT", 12, -2); editorName:SetPoint("RIGHT", -8, 0); editorName:SetHeight(22)
 
   Header(editor, 12, -30, "Texture")
+  -- Path field is narrowed so the "Choose…" button sits inline to its right (same
+  -- row, matching height). No preview swatch — the aura itself is visible in-game.
   rows[#rows + 1] = MakeText(editor, -52, "Texture",
     function() local c = Cfg(); return c and c.texture end,
-    function(v) local c = Cfg(); if c then c.texture = v end end)
+    function(v) local c = Cfg(); if c then c.texture = v end end, 248)
 
-  -- "Choose…" opens the texture picker; preview swatch shows the current art.
-  local chooseBtn = flatButton(editor, 74, 18, COLOR.heroic, "Choose…", 12)
-  chooseBtn:SetPoint("TOPLEFT", 250, -52)
-  local preview = editor:CreateTexture(nil, "ARTWORK"); preview:SetSize(20, 20)
-  preview:SetPoint("TOPLEFT", 332, -53)
+  local chooseBtn = flatButton(editor, 82, 20, COLOR.heroic, "Choose…", 12)
+  chooseBtn:SetPoint("TOPLEFT", 276, -70)   -- inline with the path field (its row = yOff-18)
   chooseBtn:SetScript("OnClick", function()
     local c = Cfg(); if not c then return end
     OpenTexturePicker(function(tex)
       c.texture = tex
       ReapplySelected()
-      C:RefreshCurrent()   -- refresh the path box + preview
+      C:RefreshCurrent()   -- refresh the path box
     end, c.texture)
   end)
-  rows[#rows + 1] = {
-    refresh = function()
-      local c = Cfg()
-      local tx = c and c.texture
-      if (not tx or tx == "") and c and c.spellID and C_Spell and C_Spell.GetSpellTexture then
-        tx = C_Spell.GetSpellTexture(c.spellID)
-      end
-      preview:SetTexture(tx or 134400)
-    end,
-    setEnabled = function(_, on) chooseBtn:SetEnabled(on) end,
-  }
+  rows[#rows + 1] = { refresh = function() end, setEnabled = function(_, on) chooseBtn:SetEnabled(on) end }
 
   -- Tint + Desaturate row.
   rows[#rows + 1] = MakeColor(editor, 16, -96,
@@ -1329,11 +1390,11 @@ local function Build()
   rows[#rows + 1] = { refresh = function() local c = Cfg(); desat:Set(c and c.desaturate) end,
                       setEnabled = function(_, on) desat:SetEnabled(on) end }
 
-  -- Blend mode + Frame strata row.
-  rows[#rows + 1] = MakeCycle(editor, 16, -122, 150, "Blend: ", BLEND_MODES,
+  -- Blend mode + Frame strata row (dropdown menus).
+  rows[#rows + 1] = MakeDropdown(editor, 16, -122, 150, "Blend: ", BLEND_MODES,
     function() local c = Cfg(); return (c and c.blend) or "BLEND" end,
     function(v) local c = Cfg(); if c then c.blend = (v ~= "BLEND") and v or nil end end)
-  rows[#rows + 1] = MakeCycle(editor, 190, -122, 150, "Strata: ", STRATA_MODES,
+  rows[#rows + 1] = MakeDropdown(editor, 190, -122, 150, "Strata: ", STRATA_MODES,
     function() local c = Cfg(); return (c and c.strata) or "HIGH" end,
     function(v) local c = Cfg(); if c then c.strata = (v ~= "HIGH") and v or nil end end)
 

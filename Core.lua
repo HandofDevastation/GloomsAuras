@@ -59,6 +59,27 @@ function GA:Version()
   return v
 end
 
+-- Pre-warm the bundled TTF fonts at login. WoW sometimes hasn't finished loading a
+-- runtime custom font on the FIRST login of a session, so any label built in that
+-- window (e.g. the options panel on an early /ga) renders BLANK until a /reload
+-- caches the font. Drawing + measuring a throwaway string in each face here forces
+-- the font into the cache before the panel is ever built, so the glyphs are ready.
+-- (The frame is kept alive on GA so the warmed strings aren't garbage-collected.)
+local function PreloadFonts()
+  local warmer = CreateFrame("Frame", nil, UIParent)
+  warmer:SetPoint("TOPLEFT"); warmer:SetSize(1, 1); warmer:SetAlpha(0)
+  GA._fontWarmer = warmer
+  for _, path in pairs(GA.FONT) do
+    local fs = warmer:CreateFontString(nil, "OVERLAY")
+    fs:SetPoint("TOPLEFT")
+    if fs:SetFont(path, 14, "") then
+      fs:SetText(".")
+      fs:GetStringWidth()   -- force the face to load + shape now, not on first visible use
+    end
+  end
+end
+GA.PreloadFonts = PreloadFonts
+
 -- ---------------------------------------------------------------------------
 -- Saved variables. Plain table, schema-versioned, never wiped on upgrade.
 -- ---------------------------------------------------------------------------
@@ -227,6 +248,7 @@ boot:SetScript("OnEvent", function(_, event, arg1)
   if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
     InitDB()
   elseif event == "PLAYER_LOGIN" then
+    PreloadFonts()   -- warm bundled fonts before any panel is built (avoids blank labels)
     if GA.CDM and GA.CDM.Init then GA.CDM:Init() end
     if GA.InitMinimapButton then GA:InitMinimapButton() end
     msg("loaded (v" .. GA:Version() .. "). Type |cffffd200/ga|r for help.")
