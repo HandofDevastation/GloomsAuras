@@ -42,6 +42,23 @@ local function CloseSubWindows(...)
   end
 end
 
+-- Dock an editor flush against the main panel's right edge (parented to it so it
+-- follows when the panel moves and hides when it closes). Flips to the LEFT side if
+-- docking right would run off the screen. Drag is disabled (it's attached now).
+local function DockRight(f)
+  if not panel then return end
+  f:SetParent(panel)
+  f:SetMovable(false)
+  f:SetClampedToScreen(false)
+  f:ClearAllPoints()
+  local pr, sw, fw = panel:GetRight(), UIParent:GetRight(), (f:GetWidth() or 0)
+  if pr and sw and (pr + fw + 2) > sw then
+    f:SetPoint("TOPRIGHT", panel, "TOPLEFT", 1, 0)    -- flip: dock on the left
+  else
+    f:SetPoint("TOPLEFT", panel, "TOPRIGHT", -1, 0)   -- dock on the right (flush)
+  end
+end
+
 local listFrame, listRows, listData, listOffset = nil, {}, {}, 0
 local LIST_ROWS = 17   -- leave room for the Add / Duplicate / Remove button stack
 local LIST_ROW_H = 24
@@ -545,7 +562,7 @@ local function BuildPicker()
   local ptb = CreateFrame("Frame", nil, f)
   ptb:SetPoint("TOPLEFT", 2, -2); ptb:SetPoint("TOPRIGHT", -34, -2); ptb:SetHeight(28)
   ptb:EnableMouse(true); ptb:RegisterForDrag("LeftButton")
-  ptb:SetScript("OnDragStart", function() f:StartMoving() end)
+  ptb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end)
   ptb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
 
   for i = 1, PICK_ROWS do
@@ -765,7 +782,7 @@ local function BuildTexturePicker()
   f:SetMovable(true); f:SetClampedToScreen(true)
   local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2)
   tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
-  tb:SetScript("OnDragStart", function() f:StartMoving() end)
+  tb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end)
   tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
 
   -- Category dropdown (button + drop-down menu).
@@ -837,6 +854,7 @@ local function OpenTexturePicker(onPick, current)
   if texCatMenu then texCatMenu:Hide() end
   SetTexCat(texCurrentCat or DEFAULT_TEX_CAT)
   CloseSubWindows(texPickerFrame)
+  DockRight(texPickerFrame)
   texPickerFrame:Show(); texPickerFrame:Raise()
 end
 
@@ -926,7 +944,7 @@ local function BuildSoundPicker()
   f:SetMovable(true); f:SetClampedToScreen(true)
   local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2)
   tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
-  tb:SetScript("OnDragStart", function() f:StartMoving() end)
+  tb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end)
   tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
 
   soundSearchBox = flatEditBox(f, 150, 20); soundSearchBox:SetPoint("TOPRIGHT", -14, -38)
@@ -998,6 +1016,7 @@ local function OpenSoundPicker(onPick, current)
   if soundSearchBox then soundSearchBox:SetText("") end
   RebuildSoundData()
   CloseSubWindows(soundPickerFrame)
+  DockRight(soundPickerFrame)
   soundPickerFrame:Show(); soundPickerFrame:Raise()
 end
 
@@ -1048,7 +1067,7 @@ end
 
 local function BuildTriggerEditor()
   local ROWS = 8
-  local W, H = 380, 118 + ROWS * 26
+  local W, H = 380, 118 + ROWS * 26 + 28   -- extra room so the hint clears the Add button
   local f = CreateFrame("Frame", "GloomsAurasTrigger", UIParent)
   f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true)
   skinPlate(f)
@@ -1058,7 +1077,7 @@ local function BuildTriggerEditor()
 
   f:SetMovable(true); f:SetClampedToScreen(true)
   local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2); tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
-  tb:SetScript("OnDragStart", function() f:StartMoving() end); tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
+  tb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end); tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
 
   triggerLogicBtn = flatButton(f, 150, 22, COLOR.purple, "Match All (AND)", 12)
   triggerLogicBtn:SetPoint("TOPLEFT", 16, -40)
@@ -1094,9 +1113,11 @@ local function BuildTriggerEditor()
   end
 
   local add = flatButton(f, 150, 24, COLOR.purple, "+ Add Condition", 12)
-  add:SetPoint("BOTTOMLEFT", 16, 16)
+  add:SetPoint("BOTTOMLEFT", 16, 42)
   add:SetScript("OnClick", function() OpenPicker(function(sid) AddCondition(sid) end) end)
-  local ah = newText(f, FONT.body, 11, MUTE, "CENTER"); ah:SetPoint("BOTTOM", 0, 20); ah:SetText("no conditions = the aura shows on its own state · click a state to change it")
+  -- Width-constrained so it wraps instead of running off the edges, and below the Add button.
+  local ah = newText(f, FONT.body, 11, MUTE, "CENTER"); ah:SetWidth(W - 32); ah:SetPoint("BOTTOM", 0, 12)
+  ah:SetText("No conditions = the aura shows on its own state · click a state to change it")
 
   f:SetScript("OnShow", RefreshTrigger)
   tinsert(UISpecialFrames, "GloomsAurasTrigger")
@@ -1114,6 +1135,7 @@ local function OpenTriggerEditor(spellID)
   end
   RefreshTrigger()
   CloseSubWindows(triggerFrame)
+  DockRight(triggerFrame)
   triggerFrame:Show(); triggerFrame:Raise()
 end
 
@@ -1182,7 +1204,7 @@ local function BuildVisibilityEditor()
   local close = flatButton(f, 22, 20, COLOR.heroic, "X", 12); close:SetPoint("TOPRIGHT", -8, -8); close:SetScript("OnClick", function() f:Hide() end)
   f:SetMovable(true); f:SetClampedToScreen(true)
   local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2); tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
-  tb:SetScript("OnDragStart", function() f:StartMoving() end); tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
+  tb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end); tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
 
   veCycle(f, 16, -56, 185, "Combat", { { "any", "Any" }, { "in", "In Combat" }, { "out", "Out of Combat" } }, "combat")
   veCycle(f, 219, -56, 185, "Target", { { "any", "Any" }, { "has", "Has Target" }, { "none", "No Target" } }, "target")
@@ -1258,6 +1280,7 @@ local function OpenVisibilityEditor(spellID)
   if visTitle then visTitle:SetText("Visibility: " .. ((c and c.label) or tostring(spellID))) end
   for _, r in ipairs(veRows) do r:refresh() end
   CloseSubWindows(visFrame)
+  DockRight(visFrame)
   visFrame:Show(); visFrame:Raise()
 end
 
@@ -1537,6 +1560,7 @@ local function Build()
     SetSelected(selectedID or DisplayList()[1])
   end)
   p:SetScript("OnHide", function()
+    CloseSubWindows()   -- close any docked drawer so it doesn't linger/reappear
     if GA.Displays then GA.Displays.forced = false; GA.Displays:SetSelectedDisplay(nil) end
     if GA.CDM and GA.CDM.Discover then GA.CDM:Discover() end
   end)

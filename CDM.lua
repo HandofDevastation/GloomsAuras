@@ -29,7 +29,8 @@ CDM.cdFrameToSpell = {} -- Blizzard cooldown widget -> spellID (rebuilt on Disco
 CDM.cdFrameToItem  = {} -- Blizzard cooldown widget -> CDM item frame (rebuilt on Discover)
 CDM.buffActive     = {} -- spellID -> bool (buff up?), mirrored from item:IsActive()
 CDM.lastShown      = {} -- display spellID -> bool (was it shown last refresh?) for sound edges
-CDM.isCharge       = {} -- spellID -> bool (charge spell: availability via IsSpellUsable, not sweep)
+CDM.isCharge       = {} -- spellID -> bool (MULTI-charge spell: availability unreadable in combat)
+CDM.maxCharges     = {} -- spellID -> maxCharges (cached when readable OOC; persists across Discover)
 
 local VIEWER_NAME_BY_CATEGORY = {
   [0] = "EssentialCooldownViewer", [1] = "UtilityCooldownViewer",
@@ -241,12 +242,30 @@ function CDM:EvalDisplay(id, cfg)
   return self.buffActive[sid] == true
 end
 
+-- Supplement availability from the CDM item's own `isOnActualCooldown` flag. It's
+-- computed `not isOnGCD and cooldownIsActive`: readable (plain) OUT of combat and while
+-- on the GCD (short-circuits to false), but SECRET in combat when off-GCD — i.e. exactly
+-- when the real cooldown matters. So this is an OUT-OF-COMBAT accuracy pass (GCD-correct);
+-- in-combat availability comes from the CooldownFrame_Set/Clear widget hooks. Guarded:
+-- a secret value is skipped, leaving the last-known (hook-provided) value.
+function CDM:SyncCooldowns()
+  for frame, sid in pairs(self.frameToSpell) do
+    if self.kind[sid] == "cooldown" and not self.isCharge[sid] then
+      local v = frame.isOnActualCooldown
+      if type(v) == "boolean" and not issecret(v) then
+        self.available[sid] = not v
+      end
+    end
+  end
+end
+
 -- Re-evaluate every display and show/hide it. Sound fires on a hidden->shown
 -- edge unless `silent` (used for the initial sync so a reload doesn't blast sound).
 function CDM:RefreshDisplays(silent)
   if not GA.Displays then return end
   local db = GA.db and GA.db.displays
   if not db then return end
+  self:SyncCooldowns()   -- refresh availability from the CDM's own on-cooldown flag
   -- While Blizzard Edit Mode is open the CDM shows SAMPLE data (everything looks
   -- active), which our mirror would otherwise reflect as real — flipping auras on
   -- and firing sounds. Freeze display updates then (unless our own config panel is
@@ -368,12 +387,24 @@ function CDM:Discover()
         end
 
         if kind == "cooldown" then
-          local charge = false
-          if info.charges ~= nil and not issecret(info.charges) then charge = (info.charges == true) end
+          -- `info.charges` only says "uses the charge system" — what matters is maxCharges:
+          -- **1 = a normal cooldown** (trackable via the sweep, e.g. Kill Shot / Black Arrow),
+          -- **>=2 = the unreadable-in-combat wall** (GetSpellCharges is secret then). maxCharges
+          -- is readable OUT of combat, so cache it (persists across Discover); until confirmed,
+          -- a charge-flagged spell is assumed multi (unreadable) to avoid false "ready".
+          pcall(function()
+            local ci = C_Spell and C_Spell.GetSpellCharges and C_Spell.GetSpellCharges(spellID)
+            if ci and not issecret(ci.maxCharges) and ci.maxCharges then self.maxCharges[spellID] = ci.maxCharges end
+          end)
+          local mx = self.maxCharges[spellID]
+          local charge
+          if mx then charge = (mx >= 2)
+          elseif info.charges == true and not issecret(info.charges) then charge = true
+          else charge = false end
           self.isCharge[spellID] = charge
 
           if charge then
-            -- Charge spells (Aimed Shot): "have >=1 charge" is SECRET in combat
+            -- MULTI-charge spells (Aimed Shot): "have >=1 charge" is SECRET in combat
             -- (GetSpellCharges + GetSpellCastCount are both SecretWhenCooldownsRestricted;
             -- IsSpellUsable ignores charges). No readable signal → leave availability
             -- UNKNOWN so a cd_ready condition on a charge spell won't falsely fire.
@@ -581,7 +612,13 @@ function CDM:Debug()
         local sid = info and info.spellID
         local nm = (sid and not issecret(sid) and C_Spell and C_Spell.GetSpellName)
                    and (C_Spell.GetSpellName(sid) or "") or ""
-        print(("      id=%s spellID=%s %s"):format(tostring(id), fmtBool(sid), nm))
+        -- Show the OVERRIDE (e.g. Black Arrow replacing Kill Shot via a hero talent).
+        local ov, ovtxt = info and info.overrideSpellID, ""
+        if ov and not issecret(ov) then
+          local ovnm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(ov)) or ""
+          ovtxt = ("  |cffffd200→ override=%s %s|r"):format(tostring(ov), ovnm)
+        end
+        print(("      id=%s spellID=%s %s%s"):format(tostring(id), fmtBool(sid), nm, ovtxt))
       end
     end
   end
