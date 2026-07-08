@@ -679,8 +679,12 @@ local function RefreshList()
       if row.arrow then row.arrow:Hide() end
       if row.gear then row.gear:Hide() end
       row.icon:Show()
-      local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture((cfg and cfg.spellID) or sid)
-      row.icon:SetTexture(icon or 134400)
+      -- Show what the aura LOOKS like: its own texture first (appearance-first model),
+      -- else its tracked spell's icon (legacy auras with no custom texture), else a fallback.
+      local icon = (cfg and cfg.texture)
+        or (cfg and cfg.spellID and C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(cfg.spellID))
+        or 134400
+      row.icon:SetTexture(icon)
       if row.eye then
         row.eye:Show()
         local shown = not (cfg and cfg.enabled == false)
@@ -2320,7 +2324,7 @@ local function Build()
   -- row, matching height). No preview swatch — the aura itself is visible in-game.
   rows[#rows + 1] = MakeText(editor, -52, "Texture",
     function() local c = Cfg(); return c and c.texture end,
-    function(v) local c = Cfg(); if c then c.texture = v end end, 248)
+    function(v) local c = Cfg(); if c then c.texture = v; RefreshList() end end, 248)
 
   local chooseBtn = flatButton(editor, 82, 20, COLOR.heroic, "Choose…", 12)
   chooseBtn:SetPoint("TOPLEFT", 276, -70)   -- inline with the path field (its row = yOff-18)
@@ -2330,6 +2334,7 @@ local function Build()
       c.texture = tex
       ReapplySelected()
       C:RefreshCurrent()   -- refresh the path box
+      RefreshList()        -- update the left-pane mini-icon to the new texture
     end, c.texture)
   end)
   rows[#rows + 1] = { refresh = function() end, setEnabled = function(_, on) chooseBtn:SetEnabled(on) end }
