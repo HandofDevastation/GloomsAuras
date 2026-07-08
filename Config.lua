@@ -381,7 +381,10 @@ local function SummaryText(cfg)
   if t and t.conditions and #t.conditions > 0 then
     return ("|cffffffff%d condition(s) · %s|r"):format(#t.conditions, t.logic or "AND")
   end
-  return "|cff888888none — shows on its own state|r"
+  if cfg and cfg.spellID then
+    return "|cff888888none — shows on its own spell's state|r"
+  end
+  return "|cff888888none — always shown (decoration)|r"
 end
 
 local VIS_KEYS = { "combat", "target", "casting", "mounted", "vehicle", "instance",
@@ -2238,9 +2241,23 @@ local function Build()
   end
 
   -- Button stack at the bottom of the left pane: Add / Duplicate / Remove.
+  -- Add creates a BLANK aura (appearance-first): a placeholder graphic you then name,
+  -- style, and (optionally) point at spells via the Trigger. No trigger = a decoration
+  -- that's always shown (gate it with Visibility). Spells enter ONLY via the Trigger.
   local addBtn = flatButton(listFrame, LIST_W, 26, COLOR.purple, "+ Add Aura", 13)
   addBtn:SetPoint("BOTTOMLEFT", 0, 56)
-  addBtn:SetScript("OnClick", function() OpenPicker() end)
+  addBtn:SetScript("OnClick", function()
+    local db = DB(); if not db then return end
+    local id = NewDisplayID()
+    db[id] = {
+      label = "New Aura", enabled = true, width = 64, height = 64,
+      point = { "CENTER", 0, 120 }, alpha = 1, showLabel = false,
+      texture = MEDIA .. "Textures\\Circle_Smooth",   -- neutral placeholder; swap via Choose…
+      -- no spellID + no trigger ⇒ decoration (always shown, gated by Visibility/Group)
+    }
+    if GA.CDM then GA.CDM:Discover() end
+    SetSelected(id)
+  end)
 
   -- Duplicate: an exact copy of the selected aura (same tracked spell), nudged so
   -- it doesn't sit exactly on top of the original. New display gets a unique id.

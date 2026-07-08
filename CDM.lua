@@ -254,7 +254,12 @@ function CDM:EvalDisplay(id, cfg)
   if t and t.conditions and #t.conditions > 0 then
     return self:EvalTrigger(t)
   end
-  local sid = cfg.spellID  -- auto-behavior keys off the display's OWN tracked spell
+  -- No trigger. Two cases:
+  --  • the display tracks its OWN spell (legacy) → auto-show on that spell's state.
+  --  • the display has NO spell → a pure DECORATION: always show, gated only by the
+  --    Group + Visibility checks above (e.g. a graphic shown only out of combat).
+  local sid = cfg.spellID
+  if not sid then return true end
   if self.kind[sid] == "cooldown" then
     local a = self.available[sid]; if a == nil then a = true end
     return a == true
