@@ -20,6 +20,17 @@ D.frames = {}       -- display id -> frame
 D.forced = false    -- true while previewing/testing: ignore CDM show/hide
 D.selectedID = nil  -- the aura selected in the panel; only it is draggable (nil = all)
 
+-- On-screen text anchor → { labelPoint, framePoint, baseX, baseY }. The text's
+-- labelPoint attaches to the aura frame's framePoint, with a small base gap; the
+-- user's cfg.text.x/y offsets add on top. Default = BOTTOM (text under the aura).
+local LABEL_ANCHOR = {
+  BOTTOM = { "TOP", "BOTTOM", 0, -4 },
+  TOP    = { "BOTTOM", "TOP", 0, 4 },
+  CENTER = { "CENTER", "CENTER", 0, 0 },
+  LEFT   = { "RIGHT", "LEFT", -4, 0 },
+  RIGHT  = { "LEFT", "RIGHT", 4, 0 },
+}
+
 local function DB()
   return GA.db and GA.db.displays
 end
@@ -46,9 +57,8 @@ function D:GetOrCreate(spellID)
     tex:SetAllPoints()
     f.tex = tex
 
-    local label = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    label:SetPoint("TOP", f, "BOTTOM", 0, -4)
-    f.label = label
+    local label = f:CreateFontString(nil, "OVERLAY")
+    f.label = label   -- font/size/outline/color/anchor all set in ApplyConfig (cfg.text)
 
     -- Native cooldown swipe (used for cooldown-type displays). The game draws
     -- the sweep + countdown from a (possibly secret) duration — we never read it.
@@ -134,8 +144,26 @@ function D:ApplyConfig(spellID)
   -- Frame strata (how the aura layers against other UI).
   f:SetFrameStrata((cfg.strata and cfg.strata ~= "" and cfg.strata) or "HIGH")
 
-  if cfg.showLabel ~= false then
-    f.label:SetText(cfg.label or tostring(cfg.spellID or spellID))
+  -- On-screen text overlay. cfg.text = { show, str, font, size, color, outline, anchor, x, y }.
+  -- Backward-compat: no cfg.text ⇒ legacy behavior (show the aura's name via cfg.showLabel).
+  local t = cfg.text
+  local show
+  if t then show = (t.show ~= false) else show = (cfg.showLabel ~= false) end
+  if show then
+    local str = (t and t.str and t.str ~= "" and t.str) or cfg.label or tostring(cfg.spellID or spellID)
+    local font = (t and t.font) or (GA.FONT and GA.FONT.body) or (STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF")
+    local fallbackFont = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
+    local size = (t and t.size) or 14
+    local flags = (t and t.outline == "NONE") and "" or (t and t.outline) or "OUTLINE"
+    local col = t and t.color
+    local a = LABEL_ANCHOR[(t and t.anchor) or "BOTTOM"] or LABEL_ANCHOR.BOTTOM
+    local ux, uy = (t and t.x) or 0, (t and t.y) or 0
+
+    if not f.label:SetFont(font, size, flags) then f.label:SetFont(fallbackFont, size, flags) end
+    f.label:SetTextColor(col and col[1] or 1, col and col[2] or 1, col and col[3] or 1)
+    f.label:SetText(str)
+    f.label:ClearAllPoints()
+    f.label:SetPoint(a[1], f, a[2], a[3] + ux, a[4] + uy)
     f.label:Show()
   else
     f.label:Hide()

@@ -722,10 +722,14 @@ local function SetSelected(sid)
   selectedID = sid
   if GA.Displays then GA.Displays:SetSelectedDisplay(sid) end  -- only this one is draggable
   local cfg = Cfg()
-  if editorName then editorName:SetText(cfg and (cfg.label or tostring(sid)) or "|cff888888No aura selected — add one on the left|r") end
+  if editorName then
+    if cfg then editorName:SetText(cfg.label or tostring(sid)); editorName:Enable()
+    else editorName:SetText(""); editorName:ClearFocus(); editorName:Disable() end
+  end
   if triggerSummary then triggerSummary:SetText(cfg and SummaryText(cfg) or "") end
   if visibilitySummary then visibilitySummary:SetText(cfg and VisibilitySummary(cfg) or "") end
   for _, r in ipairs(rows) do r:refresh(); r:setEnabled(cfg ~= nil) end
+  if C.RefreshTextEditor then C:RefreshTextEditor() end   -- text drawer follows selection (self-guards to when open)
   RefreshList()
   if GA.Displays and cfg then local f = GA.Displays:GetOrCreate(sid); if f then f:Show() end end
 end
@@ -1747,6 +1751,220 @@ local function OpenGroupManager(gid)
   gmFrame:Show(); gmFrame:Raise()
 end
 
+-- --------------------------------------------------------------------------
+-- Text editor drawer: the aura's on-screen text overlay (show · content · size ·
+-- outline · anchor · color · offset). Edits the SELECTED aura's cfg.text, applied
+-- live via ReapplySelected → Displays:ApplyConfig. Docks like the other editors.
+-- (Font picker comes next.)
+-- --------------------------------------------------------------------------
+local textFrame, teTitle
+local teRows = {}
+local TE_ANCHOR = { { "BOTTOM", "Below" }, { "TOP", "Above" }, { "CENTER", "On aura" }, { "LEFT", "Left" }, { "RIGHT", "Right" } }
+local TE_OUTLINE = { { "NONE", "None" }, { "OUTLINE", "Outline" }, { "THICKOUTLINE", "Thick" } }
+
+local function TE_Text()
+  local c = Cfg(); if not c then return nil end
+  if not c.text then c.text = { show = (c.showLabel ~= false) } end   -- seed from legacy showLabel
+  return c.text
+end
+
+local function RefreshTextEditor()
+  if not (textFrame and textFrame:IsShown()) then return end   -- only when open (avoids seeding cfg.text on every select)
+  local c = Cfg()
+  if teTitle then teTitle:SetText("Text: " .. ((c and c.label) or "")) end
+  for _, r in ipairs(teRows) do r:refresh() end
+end
+C.RefreshTextEditor = RefreshTextEditor
+
+-- Font picker: bundled fonts (GeneralSans / Khand) + LSM "font" media, each row
+-- previewed in its own typeface. Opened from the Text drawer (which stays open).
+local FONT_ROWS = 12
+local fontPickerFrame, fontPickerOnPick, fontData, fontOffset, fontCurrent
+local fontRows = {}
+
+local function BuildFontData()
+  local out = { { name = "Default", path = nil } }
+  if GA.FONT then
+    out[#out + 1] = { name = "GeneralSans", path = GA.FONT.body }
+    out[#out + 1] = { name = "GeneralSans Medium", path = GA.FONT.bodyM }
+    out[#out + 1] = { name = "GeneralSans Semibold", path = GA.FONT.label }
+    out[#out + 1] = { name = "Khand Medium", path = GA.FONT.head }
+    out[#out + 1] = { name = "Khand SemiBold", path = GA.FONT.title }
+  end
+  if LSM and LSM.HashTable then
+    local t = LSM:HashTable("font")
+    if t then
+      local names = {}
+      for n in pairs(t) do names[#names + 1] = n end
+      table.sort(names, function(a, b) return a:lower() < b:lower() end)
+      for _, n in ipairs(names) do out[#out + 1] = { name = n, path = t[n] } end
+    end
+  end
+  return out
+end
+
+local function fontNameFor(path)
+  if not path then return "Default" end
+  for _, it in ipairs(BuildFontData()) do
+    if it.path and tostring(it.path) == tostring(path) then return it.name end
+  end
+  return "Custom"
+end
+
+local function RefreshFontList()
+  local n = #fontData
+  local maxOff = math.max(0, n - FONT_ROWS)
+  if fontOffset > maxOff then fontOffset = maxOff end
+  if fontOffset < 0 then fontOffset = 0 end
+  for i = 1, FONT_ROWS do
+    local row, item = fontRows[i], fontData[i + fontOffset]
+    if item then
+      row.item = item
+      setFont(row.text, item.path or (GA.FONT and GA.FONT.body) or DEFAULT_FONT, 14)
+      row.text:SetText(item.name)
+      local isCur = (item.path == nil and fontCurrent == nil)
+                 or (item.path ~= nil and tostring(item.path) == tostring(fontCurrent))
+      row.sel:SetShown(isCur)
+      row:Show()
+    else
+      row.item = nil; row:Hide()
+    end
+  end
+end
+
+local function BuildFontPicker()
+  local W, H = 300, 56 + FONT_ROWS * 24 + 24
+  local f = CreateFrame("Frame", "GloomsAurasFontPicker", UIParent)
+  f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true); f:EnableMouseWheel(true)
+  skinPlate(f)
+  local title = newText(f, FONT.title, 18, COLOR.purple, "CENTER"); title:SetPoint("TOP", 0, -12); title:SetText("Choose a font")
+  local close = flatButton(f, 22, 20, COLOR.heroic, "X", 12); close:SetPoint("TOPRIGHT", -8, -8); close:SetScript("OnClick", function() f:Hide() end)
+  f:SetMovable(true); f:SetClampedToScreen(true)
+  local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2)
+  tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
+  tb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end)
+  tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
+  for i = 1, FONT_ROWS do
+    local row = CreateFrame("Button", nil, f); row:SetSize(W - 28, 22); row:SetPoint("TOPLEFT", 14, -40 - (i - 1) * 24)
+    local sel = row:CreateTexture(nil, "BACKGROUND"); sel:SetAllPoints(); sel:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.28); sel:Hide(); row.sel = sel
+    local hl = row:CreateTexture(nil, "HIGHLIGHT"); hl:SetAllPoints(); hl:SetColorTexture(1, 1, 1, 0.10)
+    local text = row:CreateFontString(nil, "OVERLAY"); text:SetPoint("LEFT", 8, 0); text:SetPoint("RIGHT", -8, 0); text:SetJustifyH("LEFT"); text:SetTextColor(TEXT.r, TEXT.g, TEXT.b); row.text = text
+    row:SetScript("OnClick", function(self)
+      if not self.item then return end
+      fontCurrent = self.item.path
+      if fontPickerOnPick then fontPickerOnPick(self.item.path) end
+      RefreshFontList()
+    end)
+    fontRows[i] = row
+  end
+  local footer = newText(f, FONT.body, 11, MUTE, "CENTER"); footer:SetPoint("BOTTOM", 0, 8); footer:SetText("mouse-wheel to scroll · click to apply")
+  f:SetScript("OnMouseWheel", function(_, d) fontOffset = fontOffset - d; RefreshFontList() end)
+  tinsert(UISpecialFrames, "GloomsAurasFontPicker")
+  f:Hide()
+  fontPickerFrame = f; RegisterSubWindow(f)
+  return f
+end
+
+local function OpenFontPicker(onPick, current)
+  fontPickerOnPick = onPick; fontCurrent = current
+  if not fontPickerFrame then
+    local ok, err = pcall(BuildFontPicker)
+    if not ok then GA.msg("|cffff5555font picker failed to build|r: " .. tostring(err)); return end
+  end
+  fontData = BuildFontData(); fontOffset = 0
+  CloseSubWindows(fontPickerFrame, textFrame)   -- keep the Text drawer open underneath
+  fontPickerFrame:Show(); fontPickerFrame:Raise()
+  RefreshFontList()
+end
+
+local function BuildTextEditor()
+  local W, H = 380, 316
+  local f = CreateFrame("Frame", "GloomsAurasText", UIParent)
+  f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true)
+  skinPlate(f)
+  teTitle = newText(f, FONT.title, 17, COLOR.purple, "LEFT")
+  teTitle:SetPoint("TOPLEFT", 14, -12); teTitle:SetPoint("RIGHT", -36, 0); teTitle:SetText("Text")
+  local close = flatButton(f, 22, 20, COLOR.heroic, "X", 12)
+  close:SetPoint("TOPRIGHT", -8, -8); close:SetScript("OnClick", function() f:Hide() end)
+  f:SetMovable(true); f:SetClampedToScreen(true)
+  local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2)
+  tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
+  tb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end)
+  tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
+
+  -- Show text switch.
+  local showLbl = newText(f, FONT.body, 12, TEXT, "LEFT"); showLbl:SetPoint("TOPLEFT", 16, -44); showLbl:SetText("Show text")
+  local showSw = makeSwitch(f, "OFF", "ON", function(v)
+    local t = TE_Text(); if t then t.show = v; ReapplySelected() end
+  end)
+  showSw:SetPoint("LEFT", showLbl, "RIGHT", 14, 0)
+  teRows[#teRows + 1] = { refresh = function() local t = TE_Text(); showSw:Set(not t or t.show ~= false) end }
+
+  -- Content box (blank = the aura's name).
+  local cLbl = newText(f, FONT.body, 11, MUTE, "LEFT"); cLbl:SetPoint("TOPLEFT", 16, -70); cLbl:SetText("Text  (blank = the aura's name)")
+  local cBox = flatEditBox(f, W - 32, 22); cBox:SetPoint("TOPLEFT", 16, -88)
+  cBox:SetScript("OnEnterPressed", function(self)
+    local t = TE_Text(); if t then local s = self:GetText(); t.str = (s ~= "" and s) or nil; ReapplySelected() end
+    self:ClearFocus()
+  end)
+  cBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  teRows[#teRows + 1] = { refresh = function() local t = TE_Text(); cBox:SetText((t and t.str) or ""); cBox:SetCursorPosition(0) end }
+
+  -- Font (opens the font picker; keeps this drawer open underneath).
+  local fontBtn = flatButton(f, W - 32, 22, COLOR.heroic, "Font: Default", 12)
+  fontBtn:SetPoint("TOPLEFT", 16, -118)
+  fontBtn:SetScript("OnClick", function()
+    local t = TE_Text()
+    OpenFontPicker(function(path)
+      local t2 = TE_Text(); if t2 then t2.font = path; ReapplySelected(); fontBtn:SetText("Font: " .. fontNameFor(path)) end
+    end, t and t.font)
+  end)
+  teRows[#teRows + 1] = { refresh = function() local c = Cfg(); local t = c and c.text; fontBtn:SetText("Font: " .. fontNameFor(t and t.font)) end }
+
+  -- Size slider.
+  teRows[#teRows + 1] = MakeSlider(f, -150, "Size", 6, 48, 1,
+    function() local t = TE_Text(); return t and (t.size or 14) end,
+    function(v) local t = TE_Text(); if t then t.size = v end end)
+
+  -- Outline + Anchor dropdowns.
+  teRows[#teRows + 1] = MakeDropdown(f, 16, -182, 160, "Outline: ", TE_OUTLINE,
+    function() local t = TE_Text(); return (t and t.outline) or "OUTLINE" end,
+    function(v) local t = TE_Text(); if t then t.outline = (v ~= "OUTLINE") and v or nil end end)
+  teRows[#teRows + 1] = MakeDropdown(f, 200, -182, 164, "Anchor: ", TE_ANCHOR,
+    function() local t = TE_Text(); return (t and t.anchor) or "BOTTOM" end,
+    function(v) local t = TE_Text(); if t then t.anchor = (v ~= "BOTTOM") and v or nil end end)
+
+  -- Colour.
+  teRows[#teRows + 1] = MakeColor(f, 16, -214,
+    function() local t = TE_Text(); return t and t.color end,
+    function(v) local t = TE_Text(); if t then t.color = v end end)
+
+  -- X / Y offset (added on top of the anchor's base position).
+  teRows[#teRows + 1] = MakeSlider(f, -244, "X Offset", -400, 400, 2,
+    function() local t = TE_Text(); return t and (t.x or 0) end,
+    function(v) local t = TE_Text(); if t then t.x = (v ~= 0) and v or nil end end)
+  teRows[#teRows + 1] = MakeSlider(f, -276, "Y Offset", -400, 400, 2,
+    function() local t = TE_Text(); return t and (t.y or 0) end,
+    function(v) local t = TE_Text(); if t then t.y = (v ~= 0) and v or nil end end)
+
+  tinsert(UISpecialFrames, "GloomsAurasText")
+  f:Hide()
+  textFrame = f; RegisterSubWindow(f)
+  return f
+end
+
+local function OpenTextEditor(id)
+  if not id then return end
+  if not textFrame then
+    local ok, err = pcall(BuildTextEditor)
+    if not ok then GA.msg("|cffff5555text editor failed to build|r: " .. tostring(err)); return end
+  end
+  CloseSubWindows(textFrame)
+  DockRight(textFrame)
+  textFrame:Show(); textFrame:Raise()
+  RefreshTextEditor()   -- after Show so its "only when open" guard passes
+end
+
 local function Build()
   local p = CreateFrame("Frame", "GloomsAurasConfig", UIParent)
   p:SetSize(PANEL_W, PANEL_H); p:SetPoint("CENTER"); p:SetFrameStrata("DIALOG"); p:EnableMouse(true)
@@ -1796,6 +2014,7 @@ local function Build()
     arrow:Hide(); row.arrow = arrow
     local icon = row:CreateTexture(nil, "ARTWORK"); icon:SetSize(18, 18); icon:SetPoint("LEFT", 18, 0); icon:SetTexCoord(0.08, 0.92, 0.08, 0.92); row.icon = icon
     local name = newText(row, FONT.body, 12, TEXT, "LEFT"); name:SetPoint("LEFT", 40, 0); name:SetPoint("RIGHT", -4, 0); row.name = name
+    name:SetWordWrap(false)   -- long names truncate on one line (bounded width), never wrap
     -- Manage gear (group headers only) → Manage Group drawer. Jason's icon (Media/gear.png)
     -- on a faint flat button so it's visible + clickable even before the icon file exists.
     local gear = flatButton(row, 20, 18, COLOR.purple, "", 12); gear:SetBase(0.0)
@@ -1872,8 +2091,29 @@ local function Build()
   local editor = CreateFrame("Frame", nil, p)
   editor:SetPoint("TOPLEFT", EDITOR_X, CONTENT_TOP); editor:SetSize(EDITOR_W, PANE_H)
 
-  editorName = newText(editor, FONT.title, 17, TEXT, "LEFT")
-  editorName:SetPoint("TOPLEFT", 12, -2); editorName:SetPoint("RIGHT", -8, 0); editorName:SetHeight(22)
+  -- Editable aura name (click the title, type, Enter to rename). A plain EditBox
+  -- styled like the title; a faint fill on focus signals it's editable. Renaming
+  -- updates the left-pane list + the on-screen label (when the label uses the name).
+  editorName = CreateFrame("EditBox", nil, editor)
+  editorName:SetPoint("TOPLEFT", 10, -2); editorName:SetPoint("RIGHT", -8, 0); editorName:SetHeight(26)
+  editorName:SetAutoFocus(false); editorName:SetTextInsets(4, 4, 0, 0)
+  setFont(editorName, FONT.title, 18); editorName:SetTextColor(TEXT.r, TEXT.g, TEXT.b)
+  -- Always-faint fill so it reads as an editable field (like the Texture path box);
+  -- brightens on focus. A small pencil hint on the right reinforces "click to rename".
+  local nameBG = editorName:CreateTexture(nil, "BACKGROUND"); nameBG:SetAllPoints()
+  nameBG:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.08)
+  editorName:SetScript("OnEditFocusGained", function() nameBG:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.18) end)
+  editorName:SetScript("OnEditFocusLost", function() nameBG:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.08) end)
+  local nameHint = newText(editorName, FONT.body, 11, MUTE, "RIGHT")
+  nameHint:SetPoint("RIGHT", -6, 0); nameHint:SetText("click to rename")
+  editorName:SetScript("OnEnterPressed", function(self)
+    local c = Cfg()
+    if c then local txt = self:GetText(); if txt and txt:gsub("%s", "") ~= "" then c.label = txt end end
+    self:ClearFocus()
+    local c2 = Cfg(); self:SetText((c2 and c2.label) or "")
+    RefreshList(); ReapplySelected()
+  end)
+  editorName:SetScript("OnEscapePressed", function(self) local c = Cfg(); self:SetText((c and c.label) or ""); self:ClearFocus() end)
 
   Header(editor, 12, -30, "Texture")
   -- Path field is narrowed so the "Choose…" button sits inline to its right (same
@@ -2002,8 +2242,8 @@ local function Build()
   visibilitySummary = newText(editor, FONT.body, 12, TEXT, "LEFT")
   visibilitySummary:SetPoint("LEFT", visBtn, "RIGHT", 10, 0); visibilitySummary:SetWidth(EDITOR_W - 150); visibilitySummary:SetJustifyH("LEFT")
 
-  Header(editor, 12, -434, "Sound")
-  local soundBtn = flatButton(editor, 200, 22, COLOR.heroic, "None", 12)
+  Header(editor, 12, -434, "Sound & Text")
+  local soundBtn = flatButton(editor, 150, 22, COLOR.heroic, "None", 12)
   soundBtn:SetPoint("TOPLEFT", 16, -458)
   local function soundLabel() local c = Cfg(); return (c and c.sound and c.sound.name) or "None" end
   soundBtn:SetScript("OnClick", function()
@@ -2014,14 +2254,17 @@ local function Build()
       soundBtn:SetText(soundLabel())
     end, c.sound and c.sound.file)
   end)
-  local testBtn = flatButton(editor, 60, 22, COLOR.heroic, "Test", 12)
+  local testBtn = flatButton(editor, 52, 22, COLOR.heroic, "Test", 12)
   testBtn:SetPoint("LEFT", soundBtn, "RIGHT", 8, 0)
   testBtn:SetScript("OnClick", function()
     local c = Cfg(); if c and c.sound and c.sound.file then pcall(PlaySoundFile, c.sound.file, c.sound.channel or "Master") end
   end)
+  local textBtn = flatButton(editor, 74, 22, COLOR.heroic, "Text…", 12)
+  textBtn:SetPoint("LEFT", testBtn, "RIGHT", 8, 0)
+  textBtn:SetScript("OnClick", function() if selectedID then OpenTextEditor(selectedID) end end)
   rows[#rows + 1] = {
     refresh = function() soundBtn:SetText(soundLabel()) end,
-    setEnabled = function(_, on) soundBtn:SetEnabled(on); testBtn:SetEnabled(on) end,
+    setEnabled = function(_, on) soundBtn:SetEnabled(on); testBtn:SetEnabled(on); textBtn:SetEnabled(on) end,
   }
 
   -- GROUP section (assign dropdown + on/off switch + load rule + delete) — built in
