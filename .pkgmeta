@@ -14,6 +14,8 @@ externals:
   Libs/LibDataBroker-1.1: https://github.com/tekkub/libdatabroker-1-1
   Libs/LibDBIcon-1.0: https://repos.wowace.com/wow/libdbicon-1-0/trunk/LibDBIcon-1.0
   Libs/LibSharedMedia-3.0: https://repos.wowace.com/wow/libsharedmedia-3-0/trunk/LibSharedMedia-3.0
+  # NOTE: confirm this URL resolves before the first release that ships glows (lib home moves around).
+  Libs/LibCustomGlow-1.0: https://repos.wowace.com/wow/libcustomglow-1-0/trunk
 
 # Keep repo-management files out of the packaged addon zip.
 ignore:

@@ -9,12 +9,14 @@
 
 # Embedded libraries — load FIRST. LibSharedMedia surfaces textures/fonts other
 # addons register (e.g. StoneTweaks' custom textures) into our picker; needs
-# LibStub + CallbackHandler first.
+# LibStub + CallbackHandler first. LibCustomGlow provides the aura glow effects
+# (Autocast/Pixel/Proc/Action-Button) and needs LibStub.
 Libs\LibStub\LibStub.lua
 Libs\CallbackHandler-1.0\CallbackHandler-1.0.lua
 Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
 Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 Libs\LibSharedMedia-3.0\LibSharedMedia-3.0.lua
+Libs\LibCustomGlow-1.0\LibCustomGlow-1.0.lua
 
 # Load order: Core (namespace + slash router) → Displays (frames) → CDM (mirror
 # engine) → Config (options panel) → MinimapButton (LibDBIcon launcher).

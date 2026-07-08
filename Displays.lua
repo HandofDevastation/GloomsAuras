@@ -41,6 +41,48 @@ function D:Config(spellID)
 end
 
 -- --------------------------------------------------------------------------
+-- Glow effects (LibCustomGlow). Pure rendering — never touches aura data. A glow
+-- is active while the aura FRAME is shown AND cfg.glow.type is set: started on the
+-- frame's OnShow, stopped on OnHide, re-applied on any config change. All calls are
+-- pcall-guarded so a bad arg combo degrades to "no glow", never a Lua error.
+-- --------------------------------------------------------------------------
+local LCG = LibStub and LibStub("LibCustomGlow-1.0", true)
+local GLOW_KEY = "GloomsAuras"   -- our key, so we start/stop only our own glow
+
+local function StopGlow(f)
+  if not LCG then return end
+  pcall(LCG.PixelGlow_Stop, f, GLOW_KEY)
+  pcall(LCG.AutoCastGlow_Stop, f, GLOW_KEY)
+  pcall(LCG.ButtonGlow_Stop, f)
+  pcall(LCG.ProcGlow_Stop, f, GLOW_KEY)
+end
+
+local function StartGlow(f, gtype, color)
+  if not LCG then return end
+  local col = color and { color[1] or 1, color[2] or 1, color[3] or 1, 1 } or nil
+  if gtype == "pixel" then
+    pcall(LCG.PixelGlow_Start, f, col, nil, nil, nil, nil, nil, nil, nil, GLOW_KEY)
+  elseif gtype == "autocast" then
+    pcall(LCG.AutoCastGlow_Start, f, col, nil, nil, nil, nil, nil, GLOW_KEY)
+  elseif gtype == "button" then
+    pcall(LCG.ButtonGlow_Start, f, col)
+  elseif gtype == "proc" then
+    pcall(LCG.ProcGlow_Start, f, { color = col, key = GLOW_KEY, startAnim = false })
+  end
+end
+
+-- (Re)apply the glow for one display id, honoring the frame's current shown state.
+function D:ApplyGlow(displayID)
+  local f = self.frames[displayID]; if not f then return end
+  StopGlow(f)   -- clear any current glow (type/color may have changed, or we're hiding)
+  local cfg = self:Config(displayID)
+  local g = cfg and cfg.glow
+  if f:IsShown() and g and g.type and g.type ~= "none" then
+    StartGlow(f, g.type, g.customColor and g.color or nil)
+  end
+end
+
+-- --------------------------------------------------------------------------
 -- Frame creation + config application
 -- --------------------------------------------------------------------------
 function D:GetOrCreate(spellID)
@@ -88,6 +130,11 @@ function D:GetOrCreate(spellID)
       D:SavePositionFromFrame(spellID)
       if GA.Config and GA.Config.RefreshCurrent then GA.Config:RefreshCurrent() end
     end)
+
+    -- Glow follows the frame's shown state (OnShow starts it, OnHide stops it).
+    f.displayID = spellID   -- the frames key, so the hooks can look up cfg
+    f:SetScript("OnShow", function(self2) D:ApplyGlow(self2.displayID) end)
+    f:SetScript("OnHide", function(self2) StopGlow(self2) end)
 
     f:Hide()
     self.frames[spellID] = f
@@ -168,6 +215,8 @@ function D:ApplyConfig(spellID)
   else
     f.label:Hide()
   end
+
+  self:ApplyGlow(spellID)   -- (re)apply the glow effect for this display's current config
 end
 
 -- Create/refresh every enabled display frame (starts hidden; CDM decides shown).

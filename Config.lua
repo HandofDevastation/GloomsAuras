@@ -558,10 +558,11 @@ local function makeSwitch(parent, leftText, rightText, onChange)
   return s
 end
 
--- Colour-tint control: [✓ Tint] + a swatch. Clicking either opens the game
--- ColorPickerFrame; unchecking clears the tint (cfg.color = nil ⇒ white).
-local function MakeColor(parent, x, yOff, get, set)
-  local chk = flatCheck(parent, "Tint")
+-- Colour control: [✓ <label>] + a swatch. Clicking either opens the game
+-- ColorPickerFrame; unchecking clears the colour (set(nil)). Label defaults to
+-- "Tint" (reused for the glow drawer's "Custom Color").
+local function MakeColor(parent, x, yOff, get, set, label)
+  local chk = flatCheck(parent, label or "Tint")
   chk:SetPoint("TOPLEFT", x, yOff)
   local swatch = CreateFrame("Button", nil, parent); swatch:SetSize(16, 16)
   swatch:SetPoint("LEFT", chk.label, "RIGHT", 6, 0)
@@ -737,6 +738,7 @@ local function SetSelected(sid)
   if visibilitySummary then visibilitySummary:SetText(cfg and VisibilitySummary(cfg) or "") end
   for _, r in ipairs(rows) do r:refresh(); r:setEnabled(cfg ~= nil) end
   if C.RefreshTextEditor then C:RefreshTextEditor() end   -- text drawer follows selection (self-guards to when open)
+  if C.RefreshGlowEditor then C:RefreshGlowEditor() end   -- glow drawer follows selection too
   RefreshList()
   if GA.Displays and cfg then local f = GA.Displays:GetOrCreate(sid); if f then f:Show() end end
 end
@@ -1574,13 +1576,13 @@ end
 -- --------------------------------------------------------------------------
 -- Build the main panel (two-pane: aura list | settings editor).
 -- --------------------------------------------------------------------------
-local PANEL_W, PANEL_H = 580, 704
+local PANEL_W, PANEL_H = 580, 740
 local INSET, TITLEBAR_H = 14, 32
 local CONTENT_TOP = -(TITLEBAR_H + 8)   -- -40
 local LIST_W = 160
 local EDITOR_X = INSET + LIST_W + 16     -- 190
 local EDITOR_W = PANEL_W - EDITOR_X - INSET  -- 376
-local PANE_H = 600
+local PANE_H = 636
 
 -- The aura editor's GROUP section — now JUST the "which group is this aura in"
 -- assignment dropdown (a group's OWN settings live in the Manage Group drawer, opened
@@ -2155,6 +2157,69 @@ local function OpenTextEditor(id)
   RefreshTextEditor()   -- after Show so its "only when open" guard passes
 end
 
+-- --------------------------------------------------------------------------
+-- Glow drawer (Effects): LibCustomGlow effect on the SELECTED aura. Type (None /
+-- Autocast Shine / Pixel Glow / Proc Glow / Action Button Glow) + optional custom
+-- color. cfg.glow = { type, customColor, color }. Applied live via ReapplySelected
+-- → Displays:ApplyConfig → ApplyGlow. State/functions hang on C (chunk locals full).
+-- --------------------------------------------------------------------------
+C._glow = { rows = {} }
+
+function C:BuildGlowEditor()
+  local W, H = 300, 150
+  local f = CreateFrame("Frame", "GloomsAurasGlowEditor", UIParent)
+  f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true)
+  skinPlate(f)
+  C._glow.title = newText(f, FONT.title, 16, COLOR.purple, "LEFT")
+  C._glow.title:SetPoint("TOPLEFT", 14, -14); C._glow.title:SetPoint("RIGHT", -36, 0); C._glow.title:SetText("Glow")
+  local close = flatButton(f, 22, 20, COLOR.heroic, "X", 12)
+  close:SetPoint("TOPRIGHT", -8, -8); close:SetScript("OnClick", function() f:Hide() end)
+  f:SetMovable(true); f:SetClampedToScreen(true)
+  local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2)
+  tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
+  tb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end)
+  tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
+
+  local typeLbl = newText(f, FONT.body, 12, TEXT, "LEFT"); typeLbl:SetPoint("TOPLEFT", 16, -46); typeLbl:SetText("Type")
+  C._glow.rows[#C._glow.rows + 1] = MakeDropdown(f, 58, -44, 216, "",
+    { { "none", "None" }, { "autocast", "Autocast Shine" }, { "pixel", "Pixel Glow" },
+      { "proc", "Proc Glow" }, { "button", "Action Button Glow" } },
+    function() local c = Cfg(); return (c and c.glow and c.glow.type) or "none" end,
+    function(v) local c = Cfg(); if not c then return end; c.glow = c.glow or {}; c.glow.type = (v ~= "none") and v or nil end)
+
+  C._glow.rows[#C._glow.rows + 1] = MakeColor(f, 16, -84,
+    function() local c = Cfg(); return c and c.glow and c.glow.customColor and c.glow.color end,
+    function(v) local c = Cfg(); if not c then return end; c.glow = c.glow or {}; c.glow.color = v; c.glow.customColor = (v ~= nil) or nil end,
+    "Custom Color")
+
+  local hint = newText(f, FONT.body, 11, MUTE, "LEFT")
+  hint:SetPoint("TOPLEFT", 16, -112); hint:SetPoint("RIGHT", -14, 0); hint:SetJustifyH("LEFT")
+  hint:SetText("The glow shows while the aura is on screen. Custom Color off = the glow's own default color.")
+
+  tinsert(UISpecialFrames, "GloomsAurasGlowEditor")
+  f:Hide(); C._glow.frame = f; RegisterSubWindow(f)
+  return f
+end
+
+function C:OpenGlowEditor(id)
+  if not id then return end
+  if not C._glow.frame then
+    local ok, err = pcall(function() C:BuildGlowEditor() end)
+    if not ok then GA.msg("|cffff5555glow editor failed to build|r: " .. tostring(err)); return end
+  end
+  CloseSubWindows(C._glow.frame)
+  DockRight(C._glow.frame)
+  C._glow.frame:Show(); C._glow.frame:Raise()
+  C:RefreshGlowEditor()
+end
+
+function C:RefreshGlowEditor()
+  if not (C._glow.frame and C._glow.frame:IsShown()) then return end
+  local c = Cfg()
+  if C._glow.title then C._glow.title:SetText("Glow: " .. ((c and c.label) or "")) end
+  for _, r in ipairs(C._glow.rows) do r:refresh() end
+end
+
 local function Build()
   local p = CreateFrame("Frame", "GloomsAurasConfig", UIParent)
   p:SetSize(PANEL_W, PANEL_H); p:SetPoint("CENTER"); p:SetFrameStrata("DIALOG"); p:EnableMouse(true)
@@ -2475,6 +2540,24 @@ local function Build()
   -- GROUP section (assign dropdown + on/off switch + load rule + delete) — built in
   -- its own function to keep Build under Lua 5.1's 60-upvalue limit.
   BuildGroupSection(editor)
+
+  -- EFFECTS section: drawer-based effect editors (Glow now; Motion/Frame later share
+  -- this row). The Glow… button opens the docked glow drawer (C:OpenGlowEditor).
+  Header(editor, 12, -566, "Effects")
+  local glowBtn = flatButton(editor, 110, 24, COLOR.heroic, "Glow…", 12)
+  glowBtn:SetPoint("TOPLEFT", 16, -590)
+  glowBtn:SetScript("OnClick", function() if selectedID then C:OpenGlowEditor(selectedID) end end)
+  local glowSummary = newText(editor, FONT.body, 12, TEXT, "LEFT")
+  glowSummary:SetPoint("LEFT", glowBtn, "RIGHT", 10, 0); glowSummary:SetWidth(EDITOR_W - 150); glowSummary:SetJustifyH("LEFT")
+  rows[#rows + 1] = {
+    refresh = function()
+      local c = Cfg(); local g = c and c.glow
+      local names = { autocast = "Autocast Shine", pixel = "Pixel Glow", proc = "Proc Glow", button = "Action Button Glow" }
+      local n = g and g.type and names[g.type]
+      glowSummary:SetText(n and ("|cffffffff" .. n .. "|r") or "|cff888888none|r")
+    end,
+    setEnabled = function(_, on) glowBtn:SetEnabled(on) end,
+  }
 
   -- (Remove button lives under "+ Add aura" in the left pane — see below.)
 
