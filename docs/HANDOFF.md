@@ -57,7 +57,8 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   (145 curls) — copied from ThisWeeksAuras.
 - `MinimapButton.lua` — `GA:InitMinimapButton` / `GA:ToggleMinimapButton` (LibDBIcon launcher).
 - `Libs/` — embedded LibStub, CallbackHandler-1.0, LibDataBroker-1.1, LibDBIcon-1.0,
-  LibSharedMedia-3.0 (source: TWA's copies).
+  LibSharedMedia-3.0, **LibCustomGlow-1.0** (aura glow effects) — source: TWA's copies. `Libs/` is
+  gitignored (packager fetches all libs at release); the local working copy keeps them.
 
 ## What's BUILT + QA status
 - ✅ **QA'd** Buff mirror — Trick Shots texture shows while buff active (in combat).
@@ -228,6 +229,19 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   when panel closed, Visibility(Out-of-Combat) hides/shows it on a dummy. **The engine already watched
   trigger-condition spells (`WatchedSpells`) and already treated the Trigger as the sole source of truth
   when present — this change just made that the primary model + allowed no-spell auras.**
+- ✅ **QA'd 2026-07-08 — Glow effects (LibCustomGlow)** (`fa12820`). New **"Effects"** section at the
+  bottom of the editor with a **"Glow…"** button → docked **glow drawer**: Type (None / Autocast Shine /
+  Pixel Glow / Proc Glow / Action Button Glow) + optional **Custom Color**. `cfg.glow = { type,
+  customColor, color }`. Engine in `Displays.lua`: `StartGlow`/`StopGlow`/`ApplyGlow` (all **pcall-guarded**
+  → a bad arg degrades to "no glow", never a Lua error); the glow follows the frame's shown state via
+  **OnShow/OnHide hooks** (starts on show, stops on hide, no per-poll churn since those fire only on real
+  transitions) and re-applies on any config change (`ApplyConfig` calls `ApplyGlow`). **Pure rendering, no
+  aura data.** LibCustomGlow-1.0 embedded like our other libs (TOC loads it after LibStub; `.pkgmeta`
+  fetches it — URL flagged to confirm before first release). Panel grew 704→740 / `PANE_H` 600→636 for the
+  Effects row; `MakeColor` gained an optional label (reused as "Custom Color"); glow UI state on `C._glow`.
+  **KNOWN + inherent:** the glow traces the aura's **frame rectangle** (bounding box), NOT the texture's
+  alpha shape — so it looks best on square-ish icons and boxy on non-square/irregular art. Not fixable
+  (LibCustomGlow limitation); crop-to-fit (Frame & Shaping roadmap) is the mitigation for non-square icons.
 
 ## Hard-won LEARNINGS (verified — do NOT rediscover)
 - **`FontString:SetShadowColor` / `SetShadowOffset` render NOTHING in this client** — a drop shadow via
@@ -378,7 +392,9 @@ PROFILE = { displays = { [id]=<AURA_CFG> }, groups = { [gid]=<GROUP> }, seq, gro
   group = <groupID> or nil,   -- which group this aura belongs to (nil = Ungrouped)
   text = { show=bool, str="custom text"|nil(=aura name), font=path|nil, size=N|nil,
     outline="NONE"|"OUTLINE"|"THICKOUTLINE"|nil, anchor="BOTTOM"|"TOP"|"CENTER"|"LEFT"|"RIGHT"|nil,
-    x=N|nil, y=N|nil, color={r,g,b}|nil } }   -- on-screen label; nil ⇒ legacy showLabel+name
+    x=N|nil, y=N|nil, color={r,g,b}|nil },   -- on-screen label; nil ⇒ legacy showLabel+name
+  glow = { type="autocast"|"pixel"|"proc"|"button"|nil(=none), customColor=bool|nil,
+    color={r,g,b}|nil } }   -- LibCustomGlow effect; active while the frame is shown
 ```
 `GA.db.groups[<groupID>] = { id, name, order, enabled (false=off), collapsed (bool),
 visibility = <same shape as an aura's visibility> or nil }` and `GA.db.groupSeq` (the "gN"
@@ -418,12 +434,22 @@ migration.)
 - **Phase 3 — Profiles.** ✅ **DONE + QA'd 2026-07-08** (see BUILT list): schema-2 migration + `GA.global`/
   `GA.db` split (`fc41649`), switcher UI (`6deae65`). Feature complete; nothing left open here.
 
-### ▶▶ START HERE NEXT SESSION
-No blocking pick — choose from the deferred list below. **Export/import strings** is the natural
-next step (it "naturally follows Profiles" and lets Jason share whole profiles/groups). The design
-doc's §3 flagged Phase-3 groups/groupSeq must move into the profile — that migration is DONE, so a
-future export just serializes a `PROFILE` table (or a single aura). Watch the two Config.lua limits
-(60 upvalues on `Build`, 200 locals in the chunk — see LEARNINGS) — put new state on the `C` table.
+### ▶▶ START HERE NEXT SESSION — Effects work is IN PROGRESS
+Jason kicked off an **effects/appearance** push (2026-07-08). Glow ✅ shipped. Remaining, in his stated
+priority:
+1. **Motion** — animate auras via native WoW **AnimationGroups** (pure rendering, no lib, no secret data):
+   presets Pulse (scale) / Spin (rotation) / Bounce/Drift (translate) / Fade (alpha) / Orbit, each with
+   speed + amount, plus a one-shot "pop/flash on show". Build as a **"Motion…"** button on the existing
+   **Effects** row → its own docked drawer (mirror the glow drawer). Start/stop the AnimationGroup on the
+   frame's OnShow/OnHide (same hook points glow uses).
+2. **Frame & Shaping** — colored **border** (TWA "Add Border"; we bundle ring/border textures) + **crop-to-fit
+   / zoom** for non-square icons (`SetTexCoord` to crop instead of stretch — ALSO the mitigation for the
+   boxy-glow-on-non-square-art issue) + **rounded-corner presets** via `MaskTexture` (Square/Rounded/More/
+   Circle — radius is baked into the mask, NOT a free px slider; verify masks work in Midnight first).
+- **Dynamic group layout** — backburnered (Jason's call: "can of worms").
+- Then **Export/import strings** (a `PROFILE` or single aura is one serializable table now).
+- Watch the two Config.lua limits (60 upvalues on `Build` = 56 now; 200 chunk locals = 198 now — see
+  LEARNINGS): put new drawer state/functions on the `C` table, controls as Build-locals.
 
 ### Other pending / deferred
 - **Override display polish (optional, offered, Jason didn't decide):** show a spell's **override** name+
@@ -461,8 +487,11 @@ future export just serializes a `PROFILE` table (or a single aura). Watch the tw
   (create/switch/delete+fallback/copy-independence), committed. THEN reworked **aura creation**: dropped
   the "pick a spell first" entry point for **appearance-first** creation — `+ Add Aura` makes a blank
   aura, spells enter via the Trigger only, and a **no-trigger aura is a decoration that's always shown**
-  (Visibility-gated). All QA'd. `Build()` still 57 upvalues. **No open bugs.** Commits **not yet pushed**
-  (ahead of `origin/main`). Next: Export/import (or the deferred list).
+  (Visibility-gated). All QA'd. THEN started the **effects push**: fixed the **list-row mini-icon** to
+  preview the aura's texture (not the tracked-spell icon, so decorations stop showing a red "?"), then
+  shipped **Glow** (LibCustomGlow embedded; Effects section + glow drawer, `fa12820`). `Build()` 56
+  upvalues, chunk 198/200 locals. **No open bugs.** Commits **not yet pushed** (ahead of `origin/main`).
+  Next: **Motion** (native AnimationGroups), then **Frame & Shaping** (border + crop-to-fit + rounded presets).
 - **Session end 2026-07-07 (second session):** shipped the **Hide-Blizzard-CDM toggle**, **aspect-ratio
   lock** (custom lock PNGs), **custom flat sliders**, **Duplicate Aura** (multi-per-spell via display-id
   re-key), **drag-selected-only**, **font preload** (first-login blank-label fix), a **UI-cleanup batch**
