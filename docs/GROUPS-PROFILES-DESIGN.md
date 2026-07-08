@@ -1,8 +1,8 @@
-# GloomsAuras — Groups & Profiles design  (APPROVED 2026-07-07 — build next session)
+# GloomsAuras — Groups & Profiles design  (ALL PHASES SHIPPED 2026-07-08)
 
-> **Status: APPROVED, no code yet.** Jason reviewed and said "go with all your recommendations"
-> — so every §6 open decision is resolved in favor of the proposal (see §6). **Next session
-> begins with Phase 1 (Groups).** Build in phases (§7).
+> **Status: FULLY BUILT + QA'd.** All three phases (Groups data/engine, grouped left pane, Profiles)
+> shipped and committed. This doc is now the design-of-record; §7 tracks per-phase status. Every §6
+> decision was implemented as approved.
 > Goal set by Jason: (1) **Groups** of auras with a **group-level visibility/load rule**
 > (e.g. a "Marksmanship" group that only activates for that spec); (2) **Profiles** —
 > named, switchable configs with a per-character default, so different characters (and
@@ -144,7 +144,12 @@ lands soonest; profiles wrap cleanly around it afterward.
   Manage Group drawer** (Jason's pick over inline buttons / right-pane): rename, load rule, on/off
   switch, move up/down, delete. Aura editor reduced to the assign dropdown. **Also added (Jason
   request): a per-aura eye toggle** (`hidden/unhidden.png`) toggling `cfg.enabled` from the row.
-- **Phase 3 — Profiles.** Schema-2 migration, `GA.global`/`GA.db` split, active-profile selection, profile switcher UI (switch/new/copy/rename/delete). QA: two profiles on one char; a second character defaults to its own; switching swaps the whole set.
+- **Phase 3 — Profiles.** ✅ **BUILT + QA'd 2026-07-08.** Schema-2 migration (at PLAYER_LOGIN),
+  `GA.global`/`GA.db` split, per-character active-profile selection, docked Profiles-drawer switcher UI
+  (switch/new/copy/rename/delete + skinned confirm). Core API `GA:SwitchProfile/Create/Copy/RenameActive/
+  Delete`. QA passed: create+switch both ways, delete+fallback+confirm, copy independence (deep-copied).
+  Commits `fc41649` (3A data) + `6deae65` (3B UI). NOTE: hit a **200-locals-per-chunk** Lua cap in
+  `Config.lua` — all new profile state hangs on the `C` table, not module locals (see HANDOFF LEARNINGS).
 - Each phase is committed as a restore point before the next (as we've been doing).
 
 **Interim (works today):** each aura's **Visibility → Specialization** already gates by spec,

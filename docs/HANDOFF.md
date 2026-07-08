@@ -1,4 +1,4 @@
-# GloomsAuras — Session Handoff  (last updated 2026-07-07)
+# GloomsAuras — Session Handoff  (last updated 2026-07-08)
 
 **New session: read this file first, then `docs/API-NOTES.md`, then `docs/REQUIREMENTS.md`,
 then `CLAUDE.md`.** The vendored WoW skill lives in `docs/wow-addon-dev/`. This file is the
@@ -195,6 +195,26 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   old `GameFontNormal`); no `cfg.text` ⇒ legacy `showLabel` + name (backward-compatible). Drawer follows
   the panel selection (`C.RefreshTextEditor`, self-guards to when open so it doesn't seed `text` on every
   select). This closes the deferred "Text overlays + LSM font picker" item.
+- ✅ **QA'd 2026-07-08 — Profiles (Groups+Profiles Phase 3), the whole feature.** Named, switchable configs
+  with a per-character default (WeakAuras-style). Shipped in two committed sub-steps:
+  - **3A — data foundation** (`fc41649`): schema 1→2 migration + a `GA.global` (account-wide) / `GA.db`
+    (active profile) split. `GA.db` is REPOINTED to the active profile, so the ~40 existing
+    `GA.db.displays`/`groups`/`seq` call sites are untouched (the `DB()`/`Groups()` accessors already
+    indirect through `GA.db`). Migration runs at **PLAYER_LOGIN** (char name reliable then, NOT
+    ADDON_LOADED): the old flat top-level keys (`displays/groups/seq/groupSeq/hideBlizzardCDM/
+    ungroupedCollapsed`) MOVE into a profile named `"Name - Realm"` before being cleared. `panelPos` +
+    `minimap` moved to `GA.global` (account-wide). QA'd: existing auras + the Marksmanship group survived.
+  - **3B — switcher UI** (`6deae65`): a bottom-right **"Profile: ‹name›"** button opens a docked **Profiles
+    drawer** — a click-to-switch profile list + **New / Copy Current / Rename / Delete** (Delete confirms via
+    a small skinned `C:OpenConfirm`, and refuses to delete the only profile). Core API in `Core.lua`
+    (`GA:SwitchProfile/CreateProfile/CopyProfile/RenameActiveProfile/DeleteProfile/ProfileNames/
+    ActiveProfileName`); each repoints `GA.db` then `GA.RefreshForProfile` (hide the old profile's frames →
+    `CDM:Discover` → `C:OnProfileSwitched` rebuilds the panel + re-shows the new set). `/ga profile [name]`
+    back-door. QA sweep passed: create+switch both ways, delete+fallback+confirm, and **copy independence**
+    (deep-copied — editing the copy left the original untouched). Deleting the ACTIVE profile falls back to
+    the first remaining one; chars pointing at a deleted profile re-resolve to their own default next login.
+- ✅ **QA'd 2026-07-08 — Slider thumbs recolored** purple → **orange `#FF7729`** (`COLOR.orange`) on the
+  Alpha/Width/Height/X/Y sliders (Jason request). Scrollbar thumbs stay purple. `MakeSlider` only.
 
 ## Hard-won LEARNINGS (verified — do NOT rediscover)
 - **`FontString:SetShadowColor` / `SetShadowOffset` render NOTHING in this client** — a drop shadow via
@@ -203,17 +223,20 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   even a behind-sublevel copy layered awkwardly — not worth it; outline suffices.
 - **Lua 5.1 caps a function at 60 UPVALUES (`local`s captured from enclosing scope).** `Config.lua`'s
   giant `Build()` hit exactly 60 after Phase 1; one more (a `DEFAULT_FONT` ref) → `function ... has
-  more than 60 upvalues` at LOAD time and the panel wouldn't open. **The local `luac` is 5.5 (limit
-  255) so it does NOT catch this** — after adding module-level helpers that `Build` references, count
-  by hand (a function's upvalues = every module-scope `local` it or its nested closures reference).
-  Fix pattern: extract chunks of `Build` into their own module-level functions (`BuildGroupSection`,
-- **Lua 5.1 caps a function at 60 UPVALUES (`local`s captured from enclosing scope).** `Config.lua`'s
-  giant `Build()` hit exactly 60 after Phase 1; one more (a `DEFAULT_FONT` ref) → `function ... has
-  more than 60 upvalues` at LOAD time and the panel wouldn't open. **The local `luac` is 5.5 (limit
-  255) so it does NOT catch this** — after adding module-level helpers that `Build` references, count
-  by hand (a function's upvalues = every module-scope `local` it or its nested closures reference).
-  Fix pattern: extract chunks of `Build` into their own module-level functions (`BuildGroupSection`,
-  `BuildGroupManager`) so each gets its own 60 budget. Build sits ~55 now; keep it there.
+  more than 60 upvalues` at LOAD time and the panel wouldn't open. luac 5.5's `-p` does NOT enforce the
+  60 cap, **but `luac -l -l Config.lua` prints each function's `N upvalues` count** — subtract 1 for
+  `_ENV` (5.5 has it, 5.1 doesn't) to get the 5.1 number. Build's prototype count = every module-scope
+  `local` referenced by Build OR any closure nested in it. Fix pattern: extract chunks of `Build` into
+  their own module-level functions (`BuildGroupSection`, `BuildGroupManager`) so each gets its own 60
+  budget — OR hang new state/helpers on the `C` table (a field access, not an upvalue). **Build sits at
+  57 (Lua 5.1) after Phase 3; keep it there.**
+- **Lua caps a function at 200 LOCALS too — and the file CHUNK (top-level) counts (hit 2026-07-08).**
+  Every module-scope `local` (constants, `local function` helpers, forward-decls) counts toward the main
+  chunk's 200. Phase-3B's first draft added ~11 module locals and overflowed: `luac -p` → `too many
+  local variables (limit is 200) in main function`. **Unlike the 60-upvalue cap, luac 5.5's `-p` DOES
+  catch this** (same limit). `Config.lua`'s chunk is at **198/200** — essentially full. Fix pattern used:
+  put ALL new profile state + UI functions on the **`C` table** (`C._prof`, `function C:OpenProfileManager`…)
+  instead of module locals → zero new chunk locals. Do the same for any future Config.lua feature.
 - **Game fonts lack the ▼/▶ unicode triangles → they render as a tofu box.** Don't use unicode
   glyphs (or native Blizzard textures — Jason's rule) for UI marks. Use Jason's bundled PNG icons in
   `Media/` shown untinted (`SetVertexColor(1,1,1,1)`): `triangle.png` (collapse caret, rotated via
@@ -294,6 +317,7 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
 - `/ga` — open the options panel. `/ga help` — list commands.
 - `/ga debug` — CDM state dump (availability/kind/charge/IsSpellUsable per display). Ask Jason
   to paste this (or BugSack) when diagnosing.
+- `/ga profile [name]` — list profiles (active marked), or switch to one. Panel is primary.
 - `/ga minimap` — show/hide the minimap button (persisted).
 - `/ga hidecdm` — hide/show Blizzard's Cooldown Manager (alpha-0, tracking stays live; persisted).
 - `/ga charges` — which cooldowns support availability tracking (charge spells flagged). Run OOC.
@@ -301,8 +325,26 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   fields, each condition's eval). Run IN the failing state; makes trigger bugs a 30-sec find.
 - `/ga add|remove|list|pos|size|preview|test` — legacy/back-door commands (panel is primary).
 
-## SavedVariables data model  `GloomsAurasDB.displays[<displayID>]`
-> **Keying (changed 2026-07-07 for Duplicate):** the table key is now an opaque **display id**, NOT
+## SavedVariables data model  (schema 2 — profiles, since 2026-07-08)
+> **Two layers (Phase 3).** `GA.global` = the raw SV `GloomsAurasDB`; `GA.db` = the ACTIVE PROFILE
+> `GloomsAurasDB.profiles[activeName]`, REPOINTED on a switch. So `GA.db.displays/groups/seq/groupSeq/
+> hideBlizzardCDM/ungroupedCollapsed` all read the active profile; only `panelPos` + `minimap` live on
+> `GA.global` (account-wide). Active profile resolved at **PLAYER_LOGIN** (`GA.SetupActiveProfile`), which
+> also runs the one-time schema 1→2 migration. Profile ops are `GA:SwitchProfile/Create/Copy/
+> RenameActive/Delete/ProfileNames/ActiveProfileName` in `Core.lua`.
+```
+GloomsAurasDB = {                                     -- = GA.global (account-wide)
+  schema = 2,
+  profiles    = { ["Name - Realm"] = <PROFILE>, … },  -- GA.db points at the active one
+  profileKeys = { ["Name - Realm"] = "profileName" }, -- which profile each character uses
+  minimap  = { hide, minimapPos },                    -- LibDBIcon (account-wide)
+  panelPos = { x, y },                                -- panel window position (account-wide)
+}
+PROFILE = { displays = { [id]=<AURA_CFG> }, groups = { [gid]=<GROUP> }, seq, groupSeq,
+            hideBlizzardCDM = bool/nil, ungroupedCollapsed = bool/nil }   -- = GA.db
+```
+> **Keying (unchanged from 2026-07-07 Duplicate work):** each profile's `displays` key is an opaque
+> **display id**, NOT
 > the spellID. Originals keep a numeric **spellID** key (so existing data is untouched); **duplicates**
 > get a unique `"dN"` **string** key (counter `GloomsAurasDB.seq`). The tracked spell is ALWAYS
 > `cfg.spellID`. Rule of thumb: `GA.Displays.frames[]`, `CDM.lastShown[]`, `lastPlay[]`, `selectedID`,
@@ -324,18 +366,20 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
     outline="NONE"|"OUTLINE"|"THICKOUTLINE"|nil, anchor="BOTTOM"|"TOP"|"CENTER"|"LEFT"|"RIGHT"|nil,
     x=N|nil, y=N|nil, color={r,g,b}|nil } }   -- on-screen label; nil ⇒ legacy showLabel+name
 ```
-`GloomsAurasDB.groups[<groupID>] = { id, name, order, enabled (false=off), collapsed (bool),
-visibility = <same shape as an aura's visibility> or nil }` and `GloomsAurasDB.groupSeq` (the "gN"
-id counter) + `GloomsAurasDB.ungroupedCollapsed` (bool). A grouped aura shows only when its **group
-is on AND the group's load rule passes** — ANDed in front of the aura's own Visibility + Trigger.
-(Phase 3 moves `groups`/`groupSeq` into the profile; `ungroupedCollapsed` is UI state.)
-`GloomsAurasDB.hideBlizzardCDM = true/nil` (global; hides the four Blizzard CDM viewers via alpha-0).
-`GloomsAurasDB.minimap = { hide, minimapPos }` (LibDBIcon). Display shows when its **Trigger**
+`GA.db.groups[<groupID>] = { id, name, order, enabled (false=off), collapsed (bool),
+visibility = <same shape as an aura's visibility> or nil }` and `GA.db.groupSeq` (the "gN"
+id counter) + `GA.db.ungroupedCollapsed` (bool) — all now PER-PROFILE (moved off the top level in the
+schema-2 migration). A grouped aura shows only when its **group is on AND the group's load rule passes**
+— ANDed in front of the aura's own Visibility + Trigger.
+`GA.db.hideBlizzardCDM = true/nil` (PER-PROFILE; hides the four Blizzard CDM viewers via alpha-0).
+`GA.global.minimap = { hide, minimapPos }` (LibDBIcon, account-wide). Display shows when its **Trigger**
 passes AND its **Visibility** gate passes (no visibility set ⇒ always eligible).
 `state` ∈ `buff_active | buff_inactive | cd_ready | cd_oncd`. No trigger ⇒ auto-behavior
 (display's own spell: buff→active, cooldown→available). Width/Height range 8–8192, offset slider ±2000
 (drag/`/ga pos` un-clamped).
-`GloomsAurasDB.panelPos` stores the panel location; `db.schema`, `db.media` reserved.
+`GA.global.panelPos` stores the panel location (account-wide); `GA.global.schema = 2`. (The old
+top-level `displays/groups/seq/groupSeq/hideBlizzardCDM/ungroupedCollapsed/media` keys are removed by the
+migration.)
 
 ## Texture picker sourcing (verified 2026-07-07 — do NOT relitigate)
 - **Game icons** are enumerable from the client: `GetMacroIcons`/`GetLooseMacroIcons`(+Item variants)
@@ -353,18 +397,18 @@ passes AND its **Visibility** gate passes (no visibility set ⇒ always eligible
 
 ## NEXT / pending
 
-### ▶▶ START HERE NEXT SESSION: Groups + Profiles — Phase 3 (Phases 1 & 2 DONE)
-**Read [docs/GROUPS-PROFILES-DESIGN.md](GROUPS-PROFILES-DESIGN.md) first — it is the spec.**
-Jason approved every recommendation, so all design decisions are RESOLVED (see §6 there).
+### Groups + Profiles — ALL THREE PHASES DONE ✅ (spec: [docs/GROUPS-PROFILES-DESIGN.md](GROUPS-PROFILES-DESIGN.md))
 - **Phase 1 — Groups data + engine.** ✅ **DONE + QA'd 2026-07-07** (see BUILT list). Committed.
 - **Phase 2 — Grouped left pane + Manage drawer.** ✅ **DONE + QA'd 2026-07-07** (see BUILT list).
-  Grouped/collapsible left pane, gear→Manage drawer (rename/rule/on-off/reorder/delete), group
-  settings out of the editor, per-aura eye toggle. Committed as the Phase-2 restore point.
-- **Phase 3 — Profiles** (START HERE) (schema-2 migration — **must move `groups`+`groupSeq` into the profile**,
-  see design §3; `GA.global`/`GA.db`=active-profile split, switcher UI: switch/new/copy/rename/delete;
-  per-character default `"Name - Realm"`). Key trick: `GA.db` repoints to the active profile so most
-  existing `GA.db.displays` code is untouched; only `panelPos`+`minimap` move to `GA.global`.
-  `hideBlizzardCDM` stays in the profile.
+- **Phase 3 — Profiles.** ✅ **DONE + QA'd 2026-07-08** (see BUILT list): schema-2 migration + `GA.global`/
+  `GA.db` split (`fc41649`), switcher UI (`6deae65`). Feature complete; nothing left open here.
+
+### ▶▶ START HERE NEXT SESSION
+No blocking pick — choose from the deferred list below. **Export/import strings** is the natural
+next step (it "naturally follows Profiles" and lets Jason share whole profiles/groups). The design
+doc's §3 flagged Phase-3 groups/groupSeq must move into the profile — that migration is DONE, so a
+future export just serializes a `PROFILE` table (or a single aura). Watch the two Config.lua limits
+(60 upvalues on `Build`, 200 locals in the chunk — see LEARNINGS) — put new state on the `C` table.
 
 ### Other pending / deferred
 - **Override display polish (optional, offered, Jason didn't decide):** show a spell's **override** name+
@@ -382,8 +426,9 @@ Jason approved every recommendation, so all design decisions are RESOLVED (see �
   walled), Precise Shots **260240** (buff), **Kill Shot 53351 → override Black Arrow 466930** (Black Arrow
   replaces Kill Shot; a **1-charge** cd — see the charge learning above; his working aura = "Precise Shots
   active AND Kill Shot cd_ready"). His SavedVariables has displays incl. Trick Shots, Rapid Fire, Kill Shot,
-  Aimed Shot, plus experiments. He now also has a **"Marksmanship"** group (load rule = spec) with
-  Rapid Fire assigned, from Phase 1 QA.
+  Aimed Shot, plus experiments. He now also has an **"MM Hunter"** group (load rule = spec).
+- His active character/profile is **"Gloomvale - Stormrage"** (account folder `AELWYN`). After Phase-3 QA
+  he may have leftover test profiles (e.g. "Copy Test") — harmless; deletable from the Profiles drawer.
 - **Session end 2026-07-07 (third session):** shipped **Groups Phase 1** (group data + `CDM:GroupGate`
   engine, skinned name dialog) AND **Phase 2** (grouped/collapsible left pane with custom triangle +
   settings-gear icons, gear→Manage Group drawer for rename/rule/on-off/reorder/delete, group settings
@@ -392,6 +437,14 @@ Jason approved every recommendation, so all design decisions are RESOLVED (see �
   (click-to-edit title + list truncation) and the full **on-screen Text overlay** (Text drawer + font
   picker; dropped shadow — `SetShadow*` renders nothing here). All QA'd, no open bugs. `Build()` at ~57
   upvalues (watch the 60 cap). **Next: Phase 3 — Profiles.**
+- **Session end 2026-07-08 (fourth session):** shipped **Profiles (Phase 3)** end to end — schema 1→2
+  migration + `GA.global`/`GA.db` split (`fc41649`), then the switcher UI: bottom-strip "Profile: ‹name›"
+  button → docked **Profiles drawer** (switch/new/copy/rename/delete, skinned confirm) with the full Core
+  profile API (`6deae65`). Also recolored slider thumbs purple→**orange `#FF7729`** and fixed the drawer
+  footer overlapping its buttons. Hit a NEW wall — the **200-locals-per-chunk** cap in `Config.lua` (chunk
+  is at 198/200); worked around by hanging all profile state on the `C` table (see LEARNINGS). All QA'd
+  (create/switch/delete+fallback/copy-independence), committed, **not yet pushed** (2 commits ahead of
+  `origin/main`). `Build()` still 57 upvalues. **No open bugs.** Next: Export/import (or the deferred list).
 - **Session end 2026-07-07 (second session):** shipped the **Hide-Blizzard-CDM toggle**, **aspect-ratio
   lock** (custom lock PNGs), **custom flat sliders**, **Duplicate Aura** (multi-per-spell via display-id
   re-key), **drag-selected-only**, **font preload** (first-login blank-label fix), a **UI-cleanup batch**
