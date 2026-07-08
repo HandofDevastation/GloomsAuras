@@ -169,6 +169,113 @@ end
 GA.SetupActiveProfile = SetupActiveProfile
 
 -- ---------------------------------------------------------------------------
+-- Profile management (Phase 3B). Each op repoints GA.db to the active profile,
+-- then RefreshForProfile re-syncs the engine (drop the old profile's frames,
+-- rediscover) and the options panel. Names are trimmed; blanks/dupes are refused.
+-- ---------------------------------------------------------------------------
+local function trim(s) return (s or ""):match("^%s*(.-)%s*$") end
+
+local function deepcopy(v)
+  if type(v) ~= "table" then return v end
+  local t = {}
+  for k, val in pairs(v) do t[k] = deepcopy(val) end
+  return t
+end
+
+-- Sorted list of all profile names (case-insensitive).
+function GA:ProfileNames()
+  local names = {}
+  local g = GA.global
+  if g and g.profiles then for name in pairs(g.profiles) do names[#names + 1] = name end end
+  table.sort(names, function(a, b) return a:lower() < b:lower() end)
+  return names
+end
+
+function GA:ActiveProfileName() return GA.activeProfile end
+
+-- Re-sync engine + UI after GA.db is repointed. Hides every existing display
+-- frame (the OLD profile's auras — Discover only re-shows the new set), then
+-- rediscovers and asks the panel to rebuild for the new profile.
+local function RefreshForProfile()
+  if GA.Displays and GA.Displays.frames then
+    for _, f in pairs(GA.Displays.frames) do f:Hide() end
+  end
+  if GA.CDM and GA.CDM.Discover then GA.CDM:Discover() end
+  if GA.Config and GA.Config.OnProfileSwitched then GA.Config:OnProfileSwitched() end
+end
+GA.RefreshForProfile = RefreshForProfile
+
+-- Switch this character to an existing profile.
+function GA:SwitchProfile(name)
+  local g = GA.global
+  if not (g and g.profiles[name]) then return false end
+  g.profileKeys[CharKey()] = name
+  GA.activeProfile = name
+  GA.db = g.profiles[name]
+  RefreshForProfile()
+  return true
+end
+
+-- Create a new EMPTY profile named `name` and switch to it.
+function GA:CreateProfile(name)
+  name = trim(name)
+  local g = GA.global
+  if name == "" or not g then return false end
+  if g.profiles[name] then return false, "exists" end
+  g.profiles[name] = NewProfile()
+  return GA:SwitchProfile(name)
+end
+
+-- Copy the ACTIVE profile into a new profile named `name` and switch to it.
+function GA:CopyProfile(name)
+  name = trim(name)
+  local g = GA.global
+  if name == "" or not g then return false end
+  if g.profiles[name] then return false, "exists" end
+  g.profiles[name] = deepcopy(GA.db)
+  return GA:SwitchProfile(name)
+end
+
+-- Rename the ACTIVE profile (repoints every character that pointed at it).
+function GA:RenameActiveProfile(name)
+  name = trim(name)
+  local g = GA.global
+  local old = GA.activeProfile
+  if name == "" or not g or not old then return false end
+  if name == old then return true end
+  if g.profiles[name] then return false, "exists" end
+  g.profiles[name] = g.profiles[old]
+  g.profiles[old] = nil
+  for char, pname in pairs(g.profileKeys) do
+    if pname == old then g.profileKeys[char] = name end
+  end
+  GA.activeProfile = name
+  if GA.Config and GA.Config.OnProfileSwitched then GA.Config:OnProfileSwitched() end
+  return true
+end
+
+-- Delete a profile. Refuses to delete the only one. If it's the active profile,
+-- falls back to the first remaining one; characters that pointed at it lose the
+-- pointer and re-resolve to their own default next login.
+function GA:DeleteProfile(name)
+  local g = GA.global
+  if not (g and g.profiles[name]) then return false end
+  local count = 0; for _ in pairs(g.profiles) do count = count + 1 end
+  if count <= 1 then return false, "last" end
+  local wasActive = (GA.activeProfile == name)
+  g.profiles[name] = nil
+  for char, pname in pairs(g.profileKeys) do
+    if pname == name then g.profileKeys[char] = nil end
+  end
+  if wasActive then
+    GA:SwitchProfile(GA:ProfileNames()[1])
+  elseif GA.Config and GA.Config.OnProfileSwitched then
+    GA.Config:OnProfileSwitched()
+  end
+  return true
+end
+
+-- ---------------------------------------------------------------------------
 -- Command helpers
 -- ---------------------------------------------------------------------------
 local function AddDisplay(arg)
@@ -240,6 +347,27 @@ local function SizeDisplay(rest)
   msg(("%s → %dpx."):format(sid, n))
 end
 
+-- /ga profile [name]  — list profiles (with the active one marked), or switch to one.
+local function ProfileCmd(rest)
+  rest = rest and rest:match("^%s*(.-)%s*$") or ""
+  if rest == "" then
+    msg("profiles (active is |cff936bff•|r):")
+    for _, name in ipairs(GA:ProfileNames()) do
+      local mark = (name == GA:ActiveProfileName()) and "|cff936bff• |r" or "  "
+      print("  " .. mark .. name)
+    end
+    print("  switch with |cffffd200/ga profile <name>|r")
+    return
+  end
+  local g = GA.global
+  if g and g.profiles[rest] then
+    GA:SwitchProfile(rest)
+    msg("switched to profile |cffffffff" .. rest .. "|r.")
+  else
+    msg("no profile named |cffffffff" .. rest .. "|r. |cffffd200/ga profile|r lists them.")
+  end
+end
+
 -- ---------------------------------------------------------------------------
 -- Slash router: /ga
 -- ---------------------------------------------------------------------------
@@ -259,6 +387,7 @@ local function SlashHandler(input)
     print("  |cffffd200/ga size <spellID> <px>|r  — set its size")
     print("  |cffffd200/ga preview|r            — show all displays while you position them")
     print("  |cffffd200/ga test|r               — flash displays for 5s")
+    print("  |cffffd200/ga profile [name]|r    — list profiles, or switch to one")
     print("  |cffffd200/ga minimap|r            — show/hide the minimap button")
     print("  |cffffd200/ga hidecdm|r            — hide/show Blizzard's Cooldown Manager")
     print("  |cffffd200/ga trace|r              — per-display trigger diagnostic")
@@ -290,6 +419,8 @@ local function SlashHandler(input)
     else
       msg("CDM engine not ready yet.")
     end
+  elseif cmd == "profile" or cmd == "profiles" then
+    ProfileCmd(rest)
   elseif cmd == "charges" then
     if GA.CDM and GA.CDM.ReportCharges then GA.CDM:ReportCharges() else msg("CDM engine not ready yet.") end
   elseif cmd == "trace" then

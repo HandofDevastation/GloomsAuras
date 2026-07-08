@@ -409,7 +409,7 @@ local function MakeSlider(parent, yOff, label, minV, maxV, step, get, set)
   minus:SetPoint("TOPLEFT", 86, yOff + 3)
 
   -- Flat slider (own look, no template): a dark track matching the input fields
-  -- (no border) + a bright-purple vertical marker for the thumb. Best-effort: if
+  -- (no border) + an orange vertical marker for the thumb. Best-effort: if
   -- it can't be built the row still works via the steppers + value box.
   local slider
   pcall(function() slider = CreateFrame("Slider", nil, parent) end)
@@ -421,7 +421,7 @@ local function MakeSlider(parent, yOff, label, minV, maxV, step, get, set)
     track:SetPoint("LEFT", 0, 0); track:SetPoint("RIGHT", 0, 0); track:SetHeight(8)
     track:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.10)  -- = input-field fill
     local thumb = slider:CreateTexture(nil, "OVERLAY")
-    thumb:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 1)      -- bright marker
+    thumb:SetColorTexture(COLOR.orange.r, COLOR.orange.g, COLOR.orange.b, 1)      -- orange marker (#FF7729)
     thumb:SetSize(6, 18)
     slider:SetThumbTexture(thumb)
     slider:SetMinMaxValues(minV, maxV); slider:SetValueStep(step); slider:SetObeyStepOnDrag(true)
@@ -1752,6 +1752,189 @@ local function OpenGroupManager(gid)
 end
 
 -- --------------------------------------------------------------------------
+-- Profiles (Phase 3B): named, switchable configs with a per-character default.
+-- A docked drawer (opened from the bottom-strip "Profile:" button) lists every
+-- profile — click one to switch — plus New / Copy / Rename / Delete. The switch
+-- itself lives in Core (GA:SwitchProfile repoints GA.db); the panel is refreshed
+-- via C:OnProfileSwitched, called back from Core after any repoint.
+-- --------------------------------------------------------------------------
+-- State + UI hang on the C table (not module-level locals) — the file chunk is
+-- near Lua's 200-locals-per-function cap, so new module locals would overflow it.
+C._prof = { offset = 0, rows = {}, ROWS = 8 }
+C._confirm = {}
+
+-- Small skinned yes/no confirm (Delete is destructive) — modeled on OpenNameDialog.
+function C:BuildConfirm()
+  local W, H = 330, 144
+  local f = CreateFrame("Frame", "GloomsAurasConfirm", UIParent)
+  f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true)
+  skinPlate(f)
+  local title = newText(f, FONT.title, 17, COLOR.orange, "CENTER")
+  title:SetPoint("TOP", 0, -14); title:SetText("Are you sure?")
+  C._confirm.body = newText(f, FONT.body, 12, TEXT, "CENTER")
+  C._confirm.body:SetPoint("TOP", 0, -46); C._confirm.body:SetWidth(W - 36)
+  local yesB = flatButton(f, 124, 26, COLOR.orange, "Delete", 13); yesB:SetPoint("BOTTOMLEFT", 26, 16)
+  local noB = flatButton(f, 124, 26, COLOR.heroic, "Cancel", 13); noB:SetPoint("BOTTOMRIGHT", -26, 16)
+  yesB:SetScript("OnClick", function() local cb = C._confirm.onYes; C._confirm.onYes = nil; f:Hide(); if cb then cb() end end)
+  noB:SetScript("OnClick", function() C._confirm.onYes = nil; f:Hide() end)
+  tinsert(UISpecialFrames, "GloomsAurasConfirm")
+  f:Hide(); C._confirm.frame = f
+  return f
+end
+function C:OpenConfirm(bodyText, onYes)
+  if not C._confirm.frame then local ok = pcall(function() C:BuildConfirm() end); if not ok then return end end
+  C._confirm.onYes = onYes
+  C._confirm.body:SetText(bodyText or "Are you sure?")
+  C._confirm.frame:Show(); C._confirm.frame:Raise()
+end
+
+function C:RefreshProfileList()
+  local pr = C._prof
+  if not (pr.frame and pr.frame:IsShown()) then return end
+  local names = GA:ProfileNames()
+  local active = GA:ActiveProfileName()
+  local n = #names
+  local maxOff = math.max(0, n - pr.ROWS)
+  if pr.offset > maxOff then pr.offset = maxOff end
+  if pr.offset < 0 then pr.offset = 0 end
+  for i = 1, pr.ROWS do
+    local row = pr.rows[i]
+    local name = names[i + pr.offset]
+    if name then
+      row.pname = name
+      row.text:SetText(name .. (name == active and "  |cff936bff(active)|r" or ""))
+      row.sel:SetShown(name == active)
+      row:Show()
+    else
+      row.pname = nil; row:Hide()
+    end
+  end
+end
+
+function C:BuildProfileManager()
+  local pr = C._prof
+  local W = 264
+  local yList = -60
+  local listH = pr.ROWS * 24
+  local yBtns = yList - listH - 14          -- first button row (below the list)
+  local yFoot = yBtns - 32 - 26 - 16        -- footer top: below the 2nd button row + a gap
+  local H = -yFoot + 34                      -- room for a (possibly 2-line) footer + bottom pad
+  local f = CreateFrame("Frame", "GloomsAurasProfileManager", UIParent)
+  f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true)
+  skinPlate(f)
+  local title = newText(f, FONT.title, 16, COLOR.purple, "LEFT")
+  title:SetPoint("TOPLEFT", 14, -14); title:SetPoint("RIGHT", -36, 0); title:SetText("Profiles")
+  local close = flatButton(f, 22, 20, COLOR.heroic, "X", 12)
+  close:SetPoint("TOPRIGHT", -8, -8); close:SetScript("OnClick", function() f:Hide() end)
+  f:SetMovable(true); f:SetClampedToScreen(true)
+  local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2)
+  tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
+  tb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end)
+  tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
+
+  local hint = newText(f, FONT.body, 11, MUTE, "LEFT")
+  hint:SetPoint("TOPLEFT", 16, -42); hint:SetText("Click a profile to switch to it.")
+
+  -- Scrollable list of profiles (mouse wheel; profiles are usually few).
+  local list = CreateFrame("Frame", nil, f)
+  list:SetPoint("TOPLEFT", 14, yList); list:SetSize(W - 28, listH)
+  list:EnableMouse(true); list:EnableMouseWheel(true)
+  list:SetScript("OnMouseWheel", function(_, d) pr.offset = pr.offset - d; C:RefreshProfileList() end)
+  for i = 1, pr.ROWS do
+    local row = CreateFrame("Button", nil, list)
+    row:SetSize(W - 28, 24); row:SetPoint("TOPLEFT", 0, -(i - 1) * 24)
+    local sel = row:CreateTexture(nil, "BACKGROUND"); sel:SetAllPoints()
+    sel:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.28); sel:Hide(); row.sel = sel
+    local hl = row:CreateTexture(nil, "HIGHLIGHT"); hl:SetAllPoints(); hl:SetColorTexture(1, 1, 1, 0.08)
+    local t = newText(row, FONT.body, 12, TEXT, "LEFT"); t:SetPoint("LEFT", 8, 0); t:SetPoint("RIGHT", -8, 0)
+    t:SetWordWrap(false); row.text = t
+    row:SetScript("OnClick", function(self)
+      if self.pname and self.pname ~= GA:ActiveProfileName() then GA:SwitchProfile(self.pname) end
+    end)
+    pr.rows[i] = row
+  end
+
+  -- Action buttons (two rows of two).
+  local newB = flatButton(f, 116, 26, COLOR.heroic, "New…", 12); newB:SetPoint("TOPLEFT", 16, yBtns)
+  newB:SetScript("OnClick", function()
+    OpenNameDialog("New Profile", "", function(name)
+      local ok, why = GA:CreateProfile(name)
+      if not ok then GA.msg(why == "exists" and "a profile with that name already exists." or "enter a profile name.") end
+    end)
+  end)
+  local copyB = flatButton(f, 116, 26, COLOR.heroic, "Copy Current…", 12); copyB:SetPoint("LEFT", newB, "RIGHT", 8, 0)
+  copyB:SetScript("OnClick", function()
+    OpenNameDialog("Copy Profile", (GA:ActiveProfileName() or "") .. " copy", function(name)
+      local ok, why = GA:CopyProfile(name)
+      if not ok then GA.msg(why == "exists" and "a profile with that name already exists." or "enter a profile name.") end
+    end)
+  end)
+  local renB = flatButton(f, 116, 26, COLOR.heroic, "Rename…", 12); renB:SetPoint("TOPLEFT", 16, yBtns - 32)
+  renB:SetScript("OnClick", function()
+    OpenNameDialog("Rename Profile", GA:ActiveProfileName() or "", function(name)
+      local ok, why = GA:RenameActiveProfile(name)
+      if not ok then GA.msg(why == "exists" and "a profile with that name already exists." or "enter a profile name.") end
+    end)
+  end)
+  local delB = flatButton(f, 116, 26, COLOR.orange, "Delete", 12); delB:SetPoint("LEFT", renB, "RIGHT", 8, 0)
+  delB:SetScript("OnClick", function()
+    local active = GA:ActiveProfileName()
+    if not active then return end
+    if #GA:ProfileNames() <= 1 then GA.msg("can't delete your only profile."); return end
+    C:OpenConfirm(("Delete profile \"%s\"?  This can't be undone."):format(active), function()
+      if GA:DeleteProfile(active) then GA.msg(("deleted profile |cffffffff%s|r."):format(active)) end
+    end)
+  end)
+
+  local foot = newText(f, FONT.body, 11, MUTE, "CENTER")
+  foot:SetPoint("TOPLEFT", 12, yFoot); foot:SetWidth(W - 24)
+  foot:SetText("Each character defaults to its own profile.")
+
+  tinsert(UISpecialFrames, "GloomsAurasProfileManager")
+  f:Hide(); pr.frame = f; RegisterSubWindow(f)
+  return f
+end
+
+function C:OpenProfileManager()
+  local pr = C._prof
+  if not pr.frame then
+    local ok, err = pcall(function() C:BuildProfileManager() end)
+    if not ok then GA.msg("|cffff5555profile manager failed to build|r: " .. tostring(err)); return end
+  end
+  CloseSubWindows(pr.frame)
+  DockRight(pr.frame)
+  pr.frame:Show(); pr.frame:Raise()
+  C:RefreshProfileList()
+end
+
+-- Keep the bottom-strip button label ("Profile: <name>") in sync.
+function C:UpdateProfileButton()
+  if self._profileBtn then
+    self._profileBtn:SetText("Profile: " .. (GA:ActiveProfileName() or "?"))
+  end
+end
+
+-- Called by Core (RefreshForProfile) after GA.db is repointed. Rebuilds the left
+-- pane + editor for the new profile and re-shows its auras (while the panel is open).
+function C:OnProfileSwitched()
+  if not panel then return end
+  C._prof.offset = 0
+  listOffset = 0
+  selectedID = nil
+  if panel:IsShown() and GA.Displays then
+    GA.Displays.forced = true
+    local db = DB()
+    if db then for sid, cfg in pairs(db) do if cfg.enabled ~= false then local fr = GA.Displays:GetOrCreate(sid); if fr then fr:Show() end end end end
+    GA.Displays:SetInteractive(true)
+  end
+  SetSelected(DisplayList()[1])   -- also refreshes the left list + editor
+  if C.RefreshGroupControl then C:RefreshGroupControl() end
+  if self._hideCDM then self._hideCDM:Set(GA.db and GA.db.hideBlizzardCDM) end
+  self:UpdateProfileButton()
+  C:RefreshProfileList()
+end
+
+-- --------------------------------------------------------------------------
 -- Text editor drawer: the aura's on-screen text overlay (show · content · size ·
 -- outline · anchor · color · offset). Edits the SELECTED aura's cfg.text, applied
 -- live via ReapplySelected → Displays:ApplyConfig. Docks like the other editors.
@@ -2282,6 +2465,15 @@ local function Build()
     hideCDM:Set(on)
     if GA.CDM and GA.CDM.ToggleBlizzardHide then GA.CDM:ToggleBlizzardHide(on) end
   end)
+  C._hideCDM = hideCDM   -- so C:OnProfileSwitched can re-sync it (hideBlizzardCDM is per-profile)
+
+  -- Profiles: the active-profile button (bottom-right) opens the Profiles drawer
+  -- (switch / new / copy / rename / delete). Label tracks the active profile.
+  local profileBtn = flatButton(p, 190, 24, COLOR.purple, "Profile: …", 12)
+  profileBtn:SetPoint("BOTTOMRIGHT", -INSET, 31)
+  profileBtn:SetScript("OnClick", function() C:OpenProfileManager() end)
+  C._profileBtn = profileBtn
+  C:UpdateProfileButton()
 
   local hint = newText(p, FONT.body, 11, MUTE, "CENTER")
   hint:SetPoint("BOTTOM", 0, 12)
@@ -2289,6 +2481,7 @@ local function Build()
 
   p:SetScript("OnShow", function()
     hideCDM:Set(GA.db and GA.db.hideBlizzardCDM)
+    C:UpdateProfileButton()
     local pos = GA.global and GA.global.panelPos
     if pos then p:ClearAllPoints(); p:SetPoint("CENTER", UIParent, "CENTER", pos[1] or 0, pos[2] or 0) end
     if GA.Displays then

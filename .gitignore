@@ -10,3 +10,6 @@
 
 # Local Claude Code settings (machine-specific)
 .claude/settings.local.json
+
+# luac -l byproduct
+luac.out
