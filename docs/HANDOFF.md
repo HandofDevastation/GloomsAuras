@@ -44,11 +44,14 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
 - `Core.lua` — namespace `GA` (`_G.GloomsAuras`), SavedVariables `GloomsAurasDB`, `/ga` router,
   **design tokens** `GA.COLOR / GA.FONT / GA.MEDIA` (matched to Build Barn).
 - `Displays.lua` — `GA.Displays`: on-screen frames (texture/size/pos/alpha + tint/desaturate/blend/
-  strata), drag-to-move while panel open (NOT clamped — auras may go off-screen), Cooldown swipe (OOC).
-- `CDM.lua` — `GA.CDM`: the mirror engine — state tracking, trigger evaluation, discovery, hooks.
+  strata), **glow** (`ApplyGlow` via LibCustomGlow, OnShow/OnHide-driven), drag-to-move while panel open
+  (NOT clamped), Cooldown swipe (OOC), **`RefreshForced`** (editor preview = selected + eye-on only).
+- `CDM.lua` — `GA.CDM`: the mirror engine — state tracking, **recursive grouped trigger eval** (AND/OR/
+  NONE), discovery, hooks.
 - `Config.lua` — `GA.Config`: the whole GUI toolkit (`flatButton/flatCheck/flatEditBox/MakeSlider/
-  MakeColor/MakeCycle/skinPlate/addEdges`) + two-pane panel + aura picker + **texture picker** +
-  trigger editor.
+  MakeColor/MakeCycle/makeSwitch/MakeDropdown/skinPlate/addEdges`) + two-pane panel + aura picker +
+  **texture picker** + **grouped trigger tree editor** (`C._trig`) + visibility/sound/text/**glow**/profile
+  drawers. Much drawer/editor state hangs on the `C` table (chunk-local cap).
 - `Media/TextureManifest.lua` — auto-generated `GA.TextureShapes` (254 aura shapes). Regenerate via
   `scratchpad/gen_manifest.py` if the bundled art changes.
 - `Media/` — bundled Khand/GeneralSans fonts, `bg_flame.png`, `minimap.png`, Jason's custom UI icons
@@ -242,8 +245,33 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   **KNOWN + inherent:** the glow traces the aura's **frame rectangle** (bounding box), NOT the texture's
   alpha shape — so it looks best on square-ish icons and boxy on non-square/irregular art. Not fixable
   (LibCustomGlow limitation); crop-to-fit (Frame & Shaping roadmap) is the mitigation for non-square icons.
+- ✅ **QA'd 2026-07-08 — One-level GROUPED trigger logic (AND/OR/NONE)** (`1294c8f`). A trigger condition
+  can now be a **group** (`{logic, conditions={leaf,…}}`) alongside leaves, so `(X OR Y) AND Z` etc. are
+  expressible. `EvalTrigger` recurses + supports **NONE** (NOR = NOT any, group-level negation);
+  `WatchedSpells` recurses (`CollectCondSpells`) so group-nested spells get mirrored. Backward-compatible
+  (flat triggers = a top group of leaves). Editor rewritten as a scrolling tree: top logic + leaf rows +
+  group headers (own AND/OR/NONE) + indented conditions + a purple **"+ Add to group" text link** +
+  "+ Add Condition" / "+ Add Group". State on `C._trig`. **Per-condition NOT** already exists via the
+  inverse states (Buff Inactive / CD On Cooldown). **⚠ Flat triggers verified in combat (auras show); a
+  trigger with an actual GROUP has NOT been end-to-end QA'd in combat yet — do that next session.**
+- ✅ **QA'd 2026-07-08 — Eye = editor preview + Disabled toggle** (`3e5d34a`). The eye icon was RE-scoped
+  (Jason clarified it never meant enable/disable): it now = **"show THIS aura on screen while the panel is
+  open"** (`cfg.preview`, default off), purely an editor convenience. While the panel is open the preview
+  shows only the **selected aura + eye-on auras** (`Displays:RefreshForced`) instead of all at once — fixes
+  the "every aura visible while editing" clutter. In-game (panel closed) is unchanged. **Enable/disable**
+  moved to a **"Disabled | Enabled" switch** at the bottom of the Visibility editor — drives `cfg.enabled`
+  for an aura, or `group.enabled` in a group's **Load Rule** (both places). Greys the list row when off.
+  A one-time **v2 migration** (`prof._eyeFixed=2`) re-enables every aura to recover from (a) the old eye
+  mis-setting `enabled=false` and (b) an interim switch's Lua-idiom bug (see LEARNINGS).
 
 ## Hard-won LEARNINGS (verified — do NOT rediscover)
+- **The `a and b or c` idiom BREAKS when `b` is `nil`/`false` — never use it to assign nil.** A "Disabled"
+  switch set `cfg.enabled = v and nil or false`: for `v==true` that's `(true and nil)`→nil→`(nil or false)`→
+  **false**, so it evaluated `false` in BOTH directions — could disable an aura but never re-enable it, which
+  looked like "auras don't show in combat" (they were stranded off). Use an explicit `if v then x=nil else
+  x=false end`. Lesson: for any assignment whose "true" value is `nil` or `false`, write the `if`, not the
+  ternary. (2026-07-08; also mirrored a symptom into a scary-looking display bug — always suspect data state
+  before the render path.)
 - **`FontString:SetShadowColor` / `SetShadowOffset` render NOTHING in this client** — a drop shadow via
   the shadow API is invisible at any offset. We dropped the shadow option (outline flags are the text
   styling). If a shadow is ever truly needed, draw it manually (a black text copy offset behind), but
@@ -379,13 +407,17 @@ PROFILE = { displays = { [id]=<AURA_CFG> }, groups = { [gid]=<GROUP> }, seq, gro
 > `frameToSpell` values, and all `C_Spell.*` calls = **cfg.spellID**. `DisplayList()` sorts by
 > `cfg.spellID` then key (never compares number vs string → no error; existing order unchanged).
 ```
-{ spellID = <tracked spell or NIL — optional since 2026-07-08; nil = decoration>, label, enabled=true,
+{ spellID = <tracked spell or NIL — optional since 2026-07-08; nil = decoration>, label,
+  enabled = true (false ⇒ "Disabled" in gameplay, set via Visibility editor; greys the list row),
+  preview = bool/nil (the EYE icon: show this aura on screen while the panel is open — editor only),
   width=64, height=64, point={"CENTER",x,y}, alpha=1,
   lockAspect = bool/nil,  aspect = <w/h ratio captured at lock time> or nil,
   showLabel=true, texture = <path/fileID or nil=spell icon>,
   color = {r,g,b} or nil,  desaturate = bool/nil,  blend = <mode or nil=BLEND>,
   strata = <mode or nil=HIGH>,  sound = { file, name, channel } or nil,
-  trigger = { logic="AND"|"OR", conditions = { { spellID, state, name }, ... } },
+  trigger = { logic="AND"|"OR"|"NONE", conditions = { <leaf> | <group>, ... } },  -- one-level groups
+    -- leaf = { spellID, state, name };  group = { logic="AND"|"OR"|"NONE", conditions={ <leaf>,... } }
+    -- AND=all, OR=any, NONE=nor(NOT any). EvalTrigger recurses; WatchedSpells recurses (CollectCondSpells).
   visibility = { combat="in"|"out"|nil, target="has"|"none"|nil, casting/mounted/vehicle/
     instance/encounter/resting/stealthed/group/raid/warmode/alive = true/nil,
     specs = { [specID]=true } or nil, spellKnown = spellID or nil },
@@ -403,7 +435,9 @@ schema-2 migration). A grouped aura shows only when its **group is on AND the gr
 — ANDed in front of the aura's own Visibility + Trigger.
 `GA.db.hideBlizzardCDM = true/nil` (PER-PROFILE; hides the four Blizzard CDM viewers via alpha-0).
 `GA.global.minimap = { hide, minimapPos }` (LibDBIcon, account-wide). Display shows when its **Trigger**
-passes AND its **Visibility** gate passes (no visibility set ⇒ always eligible).
+passes AND its **Visibility** gate passes (no visibility set ⇒ always eligible); an `enabled=false`
+(Disabled) aura never shows/tracks. **Editor preview:** while the panel is open, `Displays:RefreshForced`
+shows ONLY the selected aura + `preview`-on (eye) auras — NOT all of them (was "all enabled" before 2026-07-08).
 `state` ∈ `buff_active | buff_inactive | cd_ready | cd_oncd`. **No trigger** (after Group+Visibility pass):
 if `cfg.spellID` set ⇒ auto-behavior (its own spell: buff→active, cooldown→available); if NO `spellID` ⇒
 **decoration, always shown**. New auras (`+ Add Aura`) are blank/decoration; spells are added via the
@@ -435,8 +469,11 @@ migration.)
   `GA.db` split (`fc41649`), switcher UI (`6deae65`). Feature complete; nothing left open here.
 
 ### ▶▶ START HERE NEXT SESSION — Effects work is IN PROGRESS
-Jason kicked off an **effects/appearance** push (2026-07-08). Glow ✅ shipped. Remaining, in his stated
-priority:
+Jason kicked off an **effects/appearance** push (2026-07-08). Glow ✅ + grouped triggers ✅ + eye-preview /
+Disabled ✅ shipped. Remaining:
+0. **⚠ QA a GROUPED trigger IN COMBAT first.** The AND/OR/NONE engine is committed and the editor + flat
+   triggers are verified, but a trigger containing an actual GROUP was never driven end-to-end in combat
+   (build `(X OR Y) AND Z` on a dummy, confirm it gates correctly; also test a **NONE** group = NOT).
 1. **Motion** — animate auras via native WoW **AnimationGroups** (pure rendering, no lib, no secret data):
    presets Pulse (scale) / Spin (rotation) / Bounce/Drift (translate) / Fade (alpha) / Orbit, each with
    speed + amount, plus a one-shot "pop/flash on show". Build as a **"Motion…"** button on the existing
@@ -448,8 +485,9 @@ priority:
    Circle — radius is baked into the mask, NOT a free px slider; verify masks work in Midnight first).
 - **Dynamic group layout** — backburnered (Jason's call: "can of worms").
 - Then **Export/import strings** (a `PROFILE` or single aura is one serializable table now).
-- Watch the two Config.lua limits (60 upvalues on `Build` = 56 now; 200 chunk locals = 198 now — see
-  LEARNINGS): put new drawer state/functions on the `C` table, controls as Build-locals.
+- Watch the two Config.lua limits (60 upvalues on `Build` = 56 now; 200 chunk locals = **187 now** after
+  moving trigger state to `C._trig` — see LEARNINGS): put new drawer state/functions on the `C` table,
+  controls as Build-locals.
 
 ### Other pending / deferred
 - **Override display polish (optional, offered, Jason didn't decide):** show a spell's **override** name+
@@ -487,11 +525,14 @@ priority:
   (create/switch/delete+fallback/copy-independence), committed. THEN reworked **aura creation**: dropped
   the "pick a spell first" entry point for **appearance-first** creation — `+ Add Aura` makes a blank
   aura, spells enter via the Trigger only, and a **no-trigger aura is a decoration that's always shown**
-  (Visibility-gated). All QA'd. THEN started the **effects push**: fixed the **list-row mini-icon** to
-  preview the aura's texture (not the tracked-spell icon, so decorations stop showing a red "?"), then
-  shipped **Glow** (LibCustomGlow embedded; Effects section + glow drawer, `fa12820`). `Build()` 56
-  upvalues, chunk 198/200 locals. **No open bugs.** Commits **not yet pushed** (ahead of `origin/main`).
-  Next: **Motion** (native AnimationGroups), then **Frame & Shaping** (border + crop-to-fit + rounded presets).
+  (Visibility-gated). All QA'd. THEN the **effects push**: fixed the **list-row mini-icon** (preview the
+  aura's texture, not the tracked-spell icon), shipped **Glow** (LibCustomGlow embedded, `fa12820`), then
+  **one-level grouped trigger logic** AND/OR/NONE (`1294c8f`), then re-scoped the **eye → editor preview**
+  + a **Disabled/Enabled toggle** for auras & groups (`3e5d34a`) — fixing an ugly `v and nil or false`
+  Lua trap along the way (see LEARNINGS) that had stranded auras disabled. Chunk 187/200 locals, `Build`
+  56 upvalues. **No open bugs.** **Pushed to origin/main at session end.**
+  **▶ Next: (1) QA a GROUPED trigger in combat — only flat triggers were verified. (2) Motion. (3) Frame
+  & Shaping.**
 - **Session end 2026-07-07 (second session):** shipped the **Hide-Blizzard-CDM toggle**, **aspect-ratio
   lock** (custom lock PNGs), **custom flat sliders**, **Duplicate Aura** (multi-per-spell via display-id
   re-key), **drag-selected-only**, **font preload** (first-login blank-label fix), a **UI-cleanup batch**
