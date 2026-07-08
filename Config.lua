@@ -25,8 +25,9 @@ local DEFAULT_FONT = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
 
 local panel, selectedID, editorName, triggerSummary, visibilitySummary
 local pickerFrame, pickerOnPick
-local triggerFrame, triggerEditID, triggerTitle, triggerLogicBtn
-local rows, triggerRows = {}, {}
+local rows = {}
+-- Trigger editor state hangs on C._trig (chunk-local cap): { editID, frame, title,
+-- logicBtn, rows, offset, ROWS }. See the grouped trigger editor below.
 
 -- Pop-up editors (Trigger, Visibility, Sound, Texture, aura picker) are mutually
 -- exclusive so they don't stack on top of each other. Each registers here when built;
@@ -874,7 +875,7 @@ local function OpenPicker(onPick)
     if not ok then GA.msg("|cffff5555aura picker failed to build|r: " .. tostring(err)); return end
   end
   -- Picked FROM the Trigger editor (onPick set) → keep it open underneath.
-  CloseSubWindows(pickerFrame, onPick and triggerFrame or nil)
+  CloseSubWindows(pickerFrame, onPick and C._trig.frame or nil)
   pickerFrame:Show(); pickerFrame:Raise()
 end
 
@@ -1281,122 +1282,220 @@ local function OpenSoundPicker(onPick, current)
 end
 
 -- --------------------------------------------------------------------------
--- Trigger editor: define the conditions under which a display shows.
+-- Trigger editor: one-level GROUPED boolean logic. cfg.trigger =
+--   { logic, conditions = { <leaf> | <group>, ... } }
+-- leaf  = { spellID, state, name };  group = { logic, conditions = { <leaf>, ... } }.
+-- logic ∈ AND (all) / OR (any) / NONE (nor = NOT any). Groups nest ONE level in the
+-- UI (the engine recurses regardless). State/functions hang on C._trig to keep
+-- Config.lua under Lua's 200-locals-per-chunk cap.
 -- --------------------------------------------------------------------------
-local function TE_Cfg()
-  return triggerEditID and DB() and DB()[triggerEditID]
+C._trig = { rows = {}, offset = 0, ROWS = 9 }
+
+function C:LogicLabel(l)
+  if l == "OR" then return "Match Any (OR)"
+  elseif l == "NONE" then return "Match None (NOR)"
+  else return "Match All (AND)" end
+end
+function C:LogicNext(l)
+  if l == "OR" then return "NONE" elseif l == "NONE" then return "AND" else return "OR" end
 end
 
-local function RefreshTrigger()
-  if not triggerFrame then return end
-  local cfg = TE_Cfg(); if not cfg then return end
+function C:TrigCfg() return C._trig.editID and DB() and DB()[C._trig.editID] end
+function C:TrigTree()
+  local cfg = self:TrigCfg(); if not cfg then return nil end
   cfg.trigger = cfg.trigger or { logic = "AND", conditions = {} }
-  local t = cfg.trigger
-  triggerTitle:SetText("Trigger: " .. (cfg.label or tostring(triggerEditID)))
-  triggerLogicBtn:SetText(t.logic == "OR" and "Match Any (OR)" or "Match All (AND)")
-  for i, row in ipairs(triggerRows) do
-    local c = t.conditions[i]
-    if c then
-      local icon = c.spellID and C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(c.spellID)
-      row.icon:SetTexture(icon or 134400)
-      row.name:SetText(c.name or (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(c.spellID)) or tostring(c.spellID))
-      row.state:SetText(STATE_LABEL[c.state] or "?")
-      row:Show()
-    else
-      row:Hide()
-    end
-  end
-  if triggerSummary and triggerEditID == selectedID then triggerSummary:SetText(SummaryText(cfg)) end
+  return cfg.trigger
+end
+-- The node at a path: (ti) = top item (leaf or group); (ti, ci) = a group's child leaf.
+function C:TrigNode(ti, ci)
+  local t = self:TrigTree(); if not t then return nil end
+  local top = t.conditions[ti]; if not top then return nil end
+  if ci then return top.conditions and top.conditions[ci] end
+  return top
 end
 
-local function TE_Rebind()  -- watch-set changed → rebind, then re-render
+function C:TrigRebind()   -- watch set changed → rebind spells, then re-render
   if GA.CDM then GA.CDM:Discover() end
-  RefreshTrigger()
+  self:TrigRender()
 end
 
-local function AddCondition(spellID)
-  local cfg = TE_Cfg(); if not cfg then return end
-  cfg.trigger = cfg.trigger or { logic = "AND", conditions = {} }
-  if #cfg.trigger.conditions >= #triggerRows then GA.msg("condition limit reached."); return end
+function C:TrigAddLeaf(spellID, ti)
+  local t = self:TrigTree(); if not t then return end
+  local list = (ti and t.conditions[ti] and t.conditions[ti].conditions) or t.conditions
   local kind = GA.CDM and GA.CDM.kind and GA.CDM.kind[spellID]
   local state = (kind == "cooldown") and "cd_ready" or "buff_active"
   local name = C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(spellID)
-  table.insert(cfg.trigger.conditions, { spellID = spellID, state = state, name = name })
-  TE_Rebind()
+  table.insert(list, { spellID = spellID, state = state, name = name })
+  self:TrigRebind()
+end
+function C:TrigAddGroup()
+  local t = self:TrigTree(); if not t then return end
+  table.insert(t.conditions, { logic = "OR", conditions = {} })   -- OR is the usual reason to group
+  self:TrigRender()   -- empty group: no watch-set change yet
+end
+function C:TrigRemove(ti, ci)
+  local t = self:TrigTree(); if not t then return end
+  if ci then
+    local grp = t.conditions[ti]
+    if grp and grp.conditions then table.remove(grp.conditions, ci) end
+  else
+    table.remove(t.conditions, ti)   -- a group removes with its conditions
+  end
+  self:TrigRebind()
+end
+function C:TrigCycleState(ti, ci)
+  local leaf = self:TrigNode(ti, ci); if not leaf or not leaf.state then return end
+  local idx = 1; for j, s in ipairs(STATE_ORDER) do if s == leaf.state then idx = j break end end
+  leaf.state = STATE_ORDER[(idx % #STATE_ORDER) + 1]
+  if GA.CDM then GA.CDM:RefreshDisplays() end
+  self:TrigRender()
+end
+function C:TrigCycleLogic(ti)
+  local t = self:TrigTree(); if not t then return end
+  local node = ti and t.conditions[ti] or t
+  node.logic = self:LogicNext(node.logic)
+  if GA.CDM then GA.CDM:RefreshDisplays() end
+  self:TrigRender()
 end
 
-local function BuildTriggerEditor()
-  local ROWS = 8
-  local W, H = 380, 118 + ROWS * 26 + 28   -- extra room so the hint clears the Add button
+-- Flatten the tree into render descriptors: leaf | ghead | gleaf | gadd.
+function C:TrigEntries()
+  local out, t = {}, self:TrigTree()
+  if not t then return out end
+  for ti, node in ipairs(t.conditions) do
+    if node.conditions then
+      out[#out + 1] = { kind = "ghead", ti = ti }
+      for ci in ipairs(node.conditions) do out[#out + 1] = { kind = "gleaf", ti = ti, ci = ci } end
+      out[#out + 1] = { kind = "gadd", ti = ti }
+    else
+      out[#out + 1] = { kind = "leaf", ti = ti }
+    end
+  end
+  return out
+end
+
+function C:RenderTrigRow(row, e)
+  row.kind, row.ti, row.ci = nil, nil, nil
+  if not e then row:Hide(); return end
+  row.kind, row.ti, row.ci = e.kind, e.ti, e.ci
+  row.bracket:SetShown(e.kind ~= "leaf")   -- bracket on group rows only
+  if e.kind == "leaf" or e.kind == "gleaf" then
+    local indented = (e.kind == "gleaf")
+    local leaf = self:TrigNode(e.ti, e.ci)
+    row.icon:ClearAllPoints(); row.icon:SetPoint("LEFT", indented and 20 or 2, 0); row.icon:Show()
+    local ic = leaf and leaf.spellID and C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(leaf.spellID)
+    row.icon:SetTexture(ic or 134400)
+    row.name:ClearAllPoints(); row.name:SetPoint("LEFT", indented and 46 or 28, 0); row.name:SetWidth(indented and 96 or 114)
+    row.name:SetText((leaf and (leaf.name or (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(leaf.spellID)))) or tostring(leaf and leaf.spellID or "?"))
+    row.name:SetTextColor(TEXT.r, TEXT.g, TEXT.b); row.name:Show()
+    row.mid:SetText(STATE_LABEL[leaf and leaf.state] or "?"); row.mid:Show()
+    row.rem:Show(); row.add:Hide()
+  elseif e.kind == "ghead" then
+    local grp = self:TrigNode(e.ti)
+    row.icon:Hide()
+    row.name:ClearAllPoints(); row.name:SetPoint("LEFT", 20, 0); row.name:SetWidth(120)
+    row.name:SetText("GROUP"); row.name:SetTextColor(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b); row.name:Show()
+    row.mid:SetText(self:LogicLabel(grp and grp.logic)); row.mid:Show()
+    row.rem:Show(); row.add:Hide()
+  else  -- gadd
+    row.icon:Hide(); row.name:Hide(); row.mid:Hide(); row.rem:Hide()
+    row.addText:SetTextColor(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b)
+    row.add:Show()
+  end
+  row:Show()
+end
+
+function C:TrigRender()
+  if not C._trig.frame then return end
+  local cfg = self:TrigCfg(); if not cfg then return end
+  local t = self:TrigTree()
+  C._trig.title:SetText("Trigger: " .. (cfg.label or tostring(C._trig.editID)))
+  C._trig.logicBtn:SetText(self:LogicLabel(t.logic))
+  local entries = self:TrigEntries()
+  local maxOff = math.max(0, #entries - C._trig.ROWS)
+  if C._trig.offset > maxOff then C._trig.offset = maxOff end
+  if C._trig.offset < 0 then C._trig.offset = 0 end
+  for i = 1, C._trig.ROWS do
+    self:RenderTrigRow(C._trig.rows[i], entries[i + C._trig.offset])
+  end
+  if triggerSummary and C._trig.editID == selectedID then triggerSummary:SetText(SummaryText(cfg)) end
+end
+
+function C:BuildTriggerEditor()
+  local W, H = 388, 384
   local f = CreateFrame("Frame", "GloomsAurasTrigger", UIParent)
-  f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true)
+  f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true); f:EnableMouseWheel(true)
   skinPlate(f)
-
-  triggerTitle = newText(f, FONT.title, 18, COLOR.purple, "CENTER"); triggerTitle:SetPoint("TOP", 0, -12); triggerTitle:SetText("Trigger")
+  C._trig.title = newText(f, FONT.title, 18, COLOR.purple, "CENTER"); C._trig.title:SetPoint("TOP", 0, -12); C._trig.title:SetText("Trigger")
   local close = flatButton(f, 22, 20, COLOR.heroic, "X", 12); close:SetPoint("TOPRIGHT", -8, -8); close:SetScript("OnClick", function() f:Hide() end)
-
   f:SetMovable(true); f:SetClampedToScreen(true)
   local tb = CreateFrame("Frame", nil, f); tb:SetPoint("TOPLEFT", 2, -2); tb:SetPoint("TOPRIGHT", -34, -2); tb:SetHeight(28); tb:EnableMouse(true); tb:RegisterForDrag("LeftButton")
   tb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end); tb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
 
-  triggerLogicBtn = flatButton(f, 150, 22, COLOR.purple, "Match All (AND)", 12)
-  triggerLogicBtn:SetPoint("TOPLEFT", 16, -40)
-  triggerLogicBtn:SetScript("OnClick", function()
-    local cfg = TE_Cfg(); if not cfg or not cfg.trigger then return end
-    cfg.trigger.logic = (cfg.trigger.logic == "OR") and "AND" or "OR"
-    if GA.CDM then GA.CDM:RefreshDisplays() end
-    RefreshTrigger()
-  end)
-  local lh = newText(f, FONT.body, 11, MUTE, "LEFT"); lh:SetPoint("LEFT", triggerLogicBtn, "RIGHT", 8, 0); lh:SetText("how the conditions below combine")
+  C._trig.logicBtn = flatButton(f, 150, 22, COLOR.purple, "Match All (AND)", 12)
+  C._trig.logicBtn:SetPoint("TOPLEFT", 16, -40)
+  C._trig.logicBtn:SetScript("OnClick", function() C:TrigCycleLogic(nil) end)
+  local lh = newText(f, FONT.body, 11, MUTE, "LEFT"); lh:SetPoint("LEFT", C._trig.logicBtn, "RIGHT", 8, 0); lh:SetText("how the rows below combine")
 
-  for i = 1, ROWS do
-    local row = CreateFrame("Frame", nil, f); row:SetSize(348, 24); row:SetPoint("TOPLEFT", 16, -70 - (i - 1) * 26)
-    local icon = row:CreateTexture(nil, "ARTWORK"); icon:SetSize(20, 20); icon:SetPoint("LEFT", 0, 0); row.icon = icon
-    local name = newText(row, FONT.body, 12, TEXT, "LEFT"); name:SetPoint("LEFT", 26, 0); name:SetWidth(118); row.name = name
-    local state = flatButton(row, 148, 20, COLOR.heroic, "", 11); state:SetPoint("LEFT", 148, 0); row.state = state
-    state:SetScript("OnClick", function()
-      local cfg = TE_Cfg(); if not cfg or not cfg.trigger then return end
-      local c = cfg.trigger.conditions[i]; if not c then return end
-      local idx = 1; for j, s in ipairs(STATE_ORDER) do if s == c.state then idx = j break end end
-      c.state = STATE_ORDER[(idx % #STATE_ORDER) + 1]
-      if GA.CDM then GA.CDM:RefreshDisplays() end
-      RefreshTrigger()
+  f:SetScript("OnMouseWheel", function(_, d) C._trig.offset = C._trig.offset - d; C:TrigRender() end)
+
+  for i = 1, C._trig.ROWS do
+    local row = CreateFrame("Frame", nil, f); row:SetSize(354, 24); row:SetPoint("TOPLEFT", 16, -70 - (i - 1) * 26)
+    local bracket = row:CreateTexture(nil, "ARTWORK"); bracket:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.5)
+    bracket:SetPoint("TOPLEFT", 4, 3); bracket:SetSize(2, 26); row.bracket = bracket
+    local icon = row:CreateTexture(nil, "ARTWORK"); icon:SetSize(20, 20); icon:SetPoint("LEFT", 2, 0); row.icon = icon
+    local name = newText(row, FONT.body, 12, TEXT, "LEFT"); name:SetPoint("LEFT", 28, 0); name:SetWidth(114); name:SetWordWrap(false); row.name = name
+    local mid = flatButton(row, 152, 20, COLOR.heroic, "", 11); mid:SetPoint("LEFT", 154, 0); row.mid = mid
+    mid:SetScript("OnClick", function()
+      if row.kind == "ghead" then C:TrigCycleLogic(row.ti)
+      elseif row.kind == "leaf" or row.kind == "gleaf" then C:TrigCycleState(row.ti, row.ci) end
     end)
-    local rem = flatButton(row, 22, 20, COLOR.orange, "X", 12); rem:SetPoint("RIGHT", 0, 0)
+    local rem = flatButton(row, 22, 20, COLOR.orange, "X", 12); rem:SetPoint("RIGHT", 0, 0); row.rem = rem
     rem:SetScript("OnClick", function()
-      local cfg = TE_Cfg(); if not cfg or not cfg.trigger then return end
-      table.remove(cfg.trigger.conditions, i)
-      TE_Rebind()
+      if row.kind == "leaf" or row.kind == "ghead" then C:TrigRemove(row.ti, nil)
+      elseif row.kind == "gleaf" then C:TrigRemove(row.ti, row.ci) end
     end)
+    -- "+ Add to group" is a purple TEXT LINK (not a full button) so the grouped
+    -- rows don't read as a wall of buttons; it brightens to white on hover.
+    local add = CreateFrame("Button", nil, row); add:SetSize(120, 18); add:SetPoint("LEFT", 46, 0); row.add = add
+    row.addText = newText(add, FONT.bodyM, 12, COLOR.purple, "LEFT"); row.addText:SetPoint("LEFT", 0, 0); row.addText:SetText("+ Add to group")
+    add:SetFontString(row.addText)
+    add:SetScript("OnEnter", function() row.addText:SetTextColor(1, 1, 1) end)
+    add:SetScript("OnLeave", function() row.addText:SetTextColor(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b) end)
+    add:SetScript("OnClick", function() local ti = row.ti; OpenPicker(function(sid) C:TrigAddLeaf(sid, ti) end) end)
     row:Hide()
-    triggerRows[i] = row
+    C._trig.rows[i] = row
   end
 
-  local add = flatButton(f, 150, 24, COLOR.purple, "+ Add Condition", 12)
-  add:SetPoint("BOTTOMLEFT", 16, 42)
-  add:SetScript("OnClick", function() OpenPicker(function(sid) AddCondition(sid) end) end)
-  -- Width-constrained so it wraps instead of running off the edges, and below the Add button.
-  local ah = newText(f, FONT.body, 11, MUTE, "CENTER"); ah:SetWidth(W - 32); ah:SetPoint("BOTTOM", 0, 12)
-  ah:SetText("No conditions = the aura shows on its own state · click a state to change it")
+  local addC = flatButton(f, 140, 24, COLOR.purple, "+ Add Condition", 12)
+  addC:SetPoint("BOTTOMLEFT", 16, 44)
+  addC:SetScript("OnClick", function() OpenPicker(function(sid) C:TrigAddLeaf(sid, nil) end) end)
+  local addG = flatButton(f, 120, 24, COLOR.heroic, "+ Add Group", 12)
+  addG:SetPoint("LEFT", addC, "RIGHT", 8, 0)
+  addG:SetScript("OnClick", function() C:TrigAddGroup() end)
 
-  f:SetScript("OnShow", RefreshTrigger)
+  local ah = newText(f, FONT.body, 11, MUTE, "CENTER"); ah:SetWidth(W - 32); ah:SetPoint("BOTTOM", 0, 14)
+  ah:SetText("No conditions = shows on its own state · click a state or logic label to change it")
+
+  f:SetScript("OnShow", function() C:TrigRender() end)
   tinsert(UISpecialFrames, "GloomsAurasTrigger")
   f:Hide()
-  triggerFrame = f; RegisterSubWindow(f)
+  C._trig.frame = f; RegisterSubWindow(f)
   return f
 end
 
-local function OpenTriggerEditor(spellID)
-  if not spellID then return end
-  triggerEditID = spellID
-  if not triggerFrame then
-    local ok, err = pcall(BuildTriggerEditor)
+function C:OpenTriggerEditor(id)
+  if not id then return end
+  C._trig.editID = id
+  C._trig.offset = 0
+  if not C._trig.frame then
+    local ok, err = pcall(function() C:BuildTriggerEditor() end)
     if not ok then GA.msg("|cffff5555trigger editor failed to build|r: " .. tostring(err)); return end
   end
-  RefreshTrigger()
-  CloseSubWindows(triggerFrame)
-  DockRight(triggerFrame)
-  triggerFrame:Show(); triggerFrame:Raise()
+  CloseSubWindows(C._trig.frame)
+  DockRight(C._trig.frame)
+  C._trig.frame:Show(); C._trig.frame:Raise()
+  C:TrigRender()
 end
 
 -- --------------------------------------------------------------------------
@@ -2502,7 +2601,7 @@ local function Build()
   Header(editor, 12, -344, "Trigger & Visibility")
   local trigBtn = flatButton(editor, 110, 24, COLOR.heroic, "Edit Trigger…", 12)
   trigBtn:SetPoint("TOPLEFT", 16, -368)
-  trigBtn:SetScript("OnClick", function() if selectedID then OpenTriggerEditor(selectedID) end end)
+  trigBtn:SetScript("OnClick", function() if selectedID then C:OpenTriggerEditor(selectedID) end end)
   triggerSummary = newText(editor, FONT.body, 12, TEXT, "LEFT")
   triggerSummary:SetPoint("LEFT", trigBtn, "RIGHT", 10, 0); triggerSummary:SetWidth(EDITOR_W - 150); triggerSummary:SetJustifyH("LEFT")
 

@@ -108,6 +108,17 @@ end
 
 -- The set of spellIDs we must track state for = every display's own spell PLUS
 -- every spell referenced by any display's trigger conditions.
+-- Collect every leaf spellID from a condition tree (recurses into groups, which
+-- carry `.conditions` instead of a `.spellID`). Missing this = group-nested spells
+-- never get mirrored, so grouped triggers silently never fire.
+local function CollectCondSpells(conds, set)
+  if not conds then return end
+  for _, c in ipairs(conds) do
+    if c.spellID then set[c.spellID] = true
+    elseif c.conditions then CollectCondSpells(c.conditions, set) end
+  end
+end
+
 function CDM:WatchedSpells()
   local set = {}
   local db = GA.db and GA.db.displays
@@ -115,10 +126,7 @@ function CDM:WatchedSpells()
     for _id, cfg in pairs(db) do
       if cfg.enabled ~= false then
         if cfg.spellID then set[cfg.spellID] = true end   -- the display's own tracked spell
-        local conds = cfg.trigger and cfg.trigger.conditions
-        if conds then
-          for _, c in ipairs(conds) do if c.spellID then set[c.spellID] = true end end
-        end
+        CollectCondSpells(cfg.trigger and cfg.trigger.conditions, set)  -- + all trigger leaves (nested)
       end
     end
   end
@@ -146,18 +154,27 @@ function CDM:EvalCondition(cond)
   return false
 end
 
--- trigger = { logic = "AND"|"OR", conditions = { <cond>, ... } }.
--- (Structured so a condition could later itself be a nested group.)
+-- trigger = { logic = "AND"|"OR"|"NONE", conditions = { <node>, ... } } where a node
+-- is a leaf ({ spellID, state }) OR a nested group ({ logic, conditions }). AND = all
+-- true, OR = any true, NONE = none true (i.e. NOT any — group-level negation). The UI
+-- nests one level deep; this recursion handles any depth. Empty sub-groups (eval nil)
+-- are skipped so they don't tip AND/NONE. Returns nil only when there's nothing to weigh.
 function CDM:EvalTrigger(trigger)
   local conds = trigger and trigger.conditions
   if not conds or #conds == 0 then return nil end
-  if (trigger.logic or "AND") == "OR" then
-    for _, c in ipairs(conds) do if self:EvalCondition(c) then return true end end
-    return false
-  else
-    for _, c in ipairs(conds) do if not self:EvalCondition(c) then return false end end
-    return true
+  local logic = trigger.logic or "AND"
+  local anyTrue, allTrue = false, true
+  for _, c in ipairs(conds) do
+    local v
+    if c.conditions then v = self:EvalTrigger(c)   -- nested group
+    else v = self:EvalCondition(c) end             -- leaf
+    if v ~= nil then
+      if v then anyTrue = true else allTrue = false end
+    end
   end
+  if logic == "OR" then return anyTrue
+  elseif logic == "NONE" then return not anyTrue
+  else return allTrue end   -- AND
 end
 
 -- --------------------------------------------------------------------------
