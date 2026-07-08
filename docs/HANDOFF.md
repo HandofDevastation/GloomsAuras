@@ -215,6 +215,19 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
     the first remaining one; chars pointing at a deleted profile re-resolve to their own default next login.
 - ✅ **QA'd 2026-07-08 — Slider thumbs recolored** purple → **orange `#FF7729`** (`COLOR.orange`) on the
   Alpha/Width/Height/X/Y sliders (Jason request). Scrollbar thumbs stay purple. `MakeSlider` only.
+- ✅ **QA'd 2026-07-08 — Appearance-first aura creation + DECORATION auras** (`bcb1912`). Scope had
+  outgrown "pick a spell first": **`+ Add Aura` now makes a BLANK aura** (placeholder `Circle_Smooth`
+  graphic, name "New Aura", `showLabel=false`), selected in the editor — NO picker popup. **Spells enter
+  ONLY via the Trigger** now (the picker still backs "Edit Trigger… → + Add Condition"; the "Track a
+  Spell" shortcut Jason briefly considered was dropped as redundant with triggers). `cfg.spellID` is now
+  **optional**. `EvalDisplay` has THREE cases after the Group+Visibility gates: (1) has a Trigger → trigger
+  decides; (2) no trigger + has `spellID` → auto-show on that spell's state (**legacy back-compat, no
+  migration**); (3) no trigger + no `spellID` → **pure decoration, always shown** (e.g. a graphic gated to
+  out-of-combat via Visibility — Jason's "pink cat in the corner" case). Trigger summary now says which:
+  "always shown (decoration)" vs "shows on its own spell's state". QA'd: blank create, decoration persists
+  when panel closed, Visibility(Out-of-Combat) hides/shows it on a dummy. **The engine already watched
+  trigger-condition spells (`WatchedSpells`) and already treated the Trigger as the sole source of truth
+  when present — this change just made that the primary model + allowed no-spell auras.**
 
 ## Hard-won LEARNINGS (verified — do NOT rediscover)
 - **`FontString:SetShadowColor` / `SetShadowOffset` render NOTHING in this client** — a drop shadow via
@@ -352,7 +365,8 @@ PROFILE = { displays = { [id]=<AURA_CFG> }, groups = { [gid]=<GROUP> }, seq, gro
 > `frameToSpell` values, and all `C_Spell.*` calls = **cfg.spellID**. `DisplayList()` sorts by
 > `cfg.spellID` then key (never compares number vs string → no error; existing order unchanged).
 ```
-{ spellID, label, enabled=true, width=64, height=64, point={"CENTER",x,y}, alpha=1,
+{ spellID = <tracked spell or NIL — optional since 2026-07-08; nil = decoration>, label, enabled=true,
+  width=64, height=64, point={"CENTER",x,y}, alpha=1,
   lockAspect = bool/nil,  aspect = <w/h ratio captured at lock time> or nil,
   showLabel=true, texture = <path/fileID or nil=spell icon>,
   color = {r,g,b} or nil,  desaturate = bool/nil,  blend = <mode or nil=BLEND>,
@@ -374,9 +388,10 @@ schema-2 migration). A grouped aura shows only when its **group is on AND the gr
 `GA.db.hideBlizzardCDM = true/nil` (PER-PROFILE; hides the four Blizzard CDM viewers via alpha-0).
 `GA.global.minimap = { hide, minimapPos }` (LibDBIcon, account-wide). Display shows when its **Trigger**
 passes AND its **Visibility** gate passes (no visibility set ⇒ always eligible).
-`state` ∈ `buff_active | buff_inactive | cd_ready | cd_oncd`. No trigger ⇒ auto-behavior
-(display's own spell: buff→active, cooldown→available). Width/Height range 8–8192, offset slider ±2000
-(drag/`/ga pos` un-clamped).
+`state` ∈ `buff_active | buff_inactive | cd_ready | cd_oncd`. **No trigger** (after Group+Visibility pass):
+if `cfg.spellID` set ⇒ auto-behavior (its own spell: buff→active, cooldown→available); if NO `spellID` ⇒
+**decoration, always shown**. New auras (`+ Add Aura`) are blank/decoration; spells are added via the
+Trigger only. Width/Height range 8–8192, offset slider ±2000 (drag/`/ga pos` un-clamped).
 `GA.global.panelPos` stores the panel location (account-wide); `GA.global.schema = 2`. (The old
 top-level `displays/groups/seq/groupSeq/hideBlizzardCDM/ungroupedCollapsed/media` keys are removed by the
 migration.)
@@ -443,8 +458,11 @@ future export just serializes a `PROFILE` table (or a single aura). Watch the tw
   profile API (`6deae65`). Also recolored slider thumbs purple→**orange `#FF7729`** and fixed the drawer
   footer overlapping its buttons. Hit a NEW wall — the **200-locals-per-chunk** cap in `Config.lua` (chunk
   is at 198/200); worked around by hanging all profile state on the `C` table (see LEARNINGS). All QA'd
-  (create/switch/delete+fallback/copy-independence), committed, **not yet pushed** (2 commits ahead of
-  `origin/main`). `Build()` still 57 upvalues. **No open bugs.** Next: Export/import (or the deferred list).
+  (create/switch/delete+fallback/copy-independence), committed. THEN reworked **aura creation**: dropped
+  the "pick a spell first" entry point for **appearance-first** creation — `+ Add Aura` makes a blank
+  aura, spells enter via the Trigger only, and a **no-trigger aura is a decoration that's always shown**
+  (Visibility-gated). All QA'd. `Build()` still 57 upvalues. **No open bugs.** Commits **not yet pushed**
+  (ahead of `origin/main`). Next: Export/import (or the deferred list).
 - **Session end 2026-07-07 (second session):** shipped the **Hide-Blizzard-CDM toggle**, **aspect-ratio
   lock** (custom lock PNGs), **custom flat sliders**, **Duplicate Aura** (multi-per-spell via display-id
   re-key), **drag-selected-only**, **font preload** (first-login blank-label fix), a **UI-cleanup batch**
