@@ -401,6 +401,21 @@ function CDM:ChargeCount(spellID)
   return nil
 end
 
+-- Which spell's charge count a display's count-text should show: the display's OWN spell if it
+-- uses charges, else the first charge spell among its trigger conditions. nil = nothing to count.
+function CDM:DisplayChargeSpell(cfg)
+  if not cfg then return nil end
+  if cfg.spellID and self.isCharge[cfg.spellID] then return cfg.spellID end
+  if cfg.trigger and cfg.trigger.conditions then
+    local set = {}
+    CollectCondSpells(cfg.trigger.conditions, set)
+    for sid in pairs(set) do
+      if self.isCharge[sid] then return sid end
+    end
+  end
+  return nil
+end
+
 function CDM:FeedAllChargeShadows()
   for spellID in pairs(self.chargeShadow) do
     if self.isCharge[spellID] then self:FeedChargeShadow(spellID) end
@@ -429,6 +444,9 @@ function CDM:RefreshDisplays(silent)
         if not self.lastShown[sid] and not silent then self:PlaySound(sid, cfg) end
         self.lastShown[sid] = true
         GA.Displays:Show(sid)
+        if cfg.text and cfg.text.showCount and GA.Displays.RefreshCountText then
+          GA.Displays:RefreshCountText(sid)   -- live charge-count update (Pass 2)
+        end
       elseif show == false then
         self.lastShown[sid] = false
         GA.Displays:Hide(sid)

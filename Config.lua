@@ -2331,7 +2331,7 @@ local function OpenFontPicker(onPick, current)
 end
 
 local function BuildTextEditor()
-  local W, H = 380, 316
+  local W, H = 380, 346
   local f = CreateFrame("Frame", "GloomsAurasText", UIParent)
   f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG"); f:EnableMouse(true)
   skinPlate(f)
@@ -2353,9 +2353,20 @@ local function BuildTextEditor()
   showSw:SetPoint("LEFT", showLbl, "RIGHT", 14, 0)
   teRows[#teRows + 1] = { refresh = function() local t = TE_Text(); showSw:Set(not t or t.show ~= false) end }
 
+  -- Charge-count switch: show a charge spell's LIVE count (resolved from the aura's own spell,
+  -- else the first charge condition in its trigger) instead of the custom text. Exact for 2-charge
+  -- spells (2/1/0); blank while a 3+ charge spell is mid-recharge. Turning it on also ensures the
+  -- text is shown so the number actually appears.
+  local ccLbl = newText(f, FONT.body, 12, TEXT, "LEFT"); ccLbl:SetPoint("TOPLEFT", 16, -74); ccLbl:SetText("Charge count")
+  local ccSw = makeSwitch(f, "OFF", "ON", function(v)
+    local t = TE_Text(); if t then t.showCount = v or nil; if v then t.show = true; showSw:Set(true) end; ReapplySelected() end
+  end)
+  ccSw:SetPoint("LEFT", ccLbl, "RIGHT", 14, 0)
+  teRows[#teRows + 1] = { refresh = function() local t = TE_Text(); ccSw:Set(t and t.showCount == true) end }
+
   -- Content box (blank = the aura's name).
-  local cLbl = newText(f, FONT.body, 11, MUTE, "LEFT"); cLbl:SetPoint("TOPLEFT", 16, -70); cLbl:SetText("Text  (blank = the aura's name)")
-  local cBox = flatEditBox(f, W - 32, 22); cBox:SetPoint("TOPLEFT", 16, -88)
+  local cLbl = newText(f, FONT.body, 11, MUTE, "LEFT"); cLbl:SetPoint("TOPLEFT", 16, -100); cLbl:SetText("Text  (blank = the aura's name)")
+  local cBox = flatEditBox(f, W - 32, 22); cBox:SetPoint("TOPLEFT", 16, -118)
   cBox:SetScript("OnEnterPressed", function(self)
     local t = TE_Text(); if t then local s = self:GetText(); t.str = (s ~= "" and s) or nil; ReapplySelected() end
     self:ClearFocus()
@@ -2365,7 +2376,7 @@ local function BuildTextEditor()
 
   -- Font (opens the font picker; keeps this drawer open underneath).
   local fontBtn = flatButton(f, W - 32, 22, COLOR.heroic, "Font: Default", 12)
-  fontBtn:SetPoint("TOPLEFT", 16, -118)
+  fontBtn:SetPoint("TOPLEFT", 16, -148)
   fontBtn:SetScript("OnClick", function()
     local t = TE_Text()
     OpenFontPicker(function(path)
@@ -2375,28 +2386,28 @@ local function BuildTextEditor()
   teRows[#teRows + 1] = { refresh = function() local c = Cfg(); local t = c and c.text; fontBtn:SetText("Font: " .. fontNameFor(t and t.font)) end }
 
   -- Size slider.
-  teRows[#teRows + 1] = MakeSlider(f, -150, "Size", 6, 48, 1,
+  teRows[#teRows + 1] = MakeSlider(f, -180, "Size", 6, 48, 1,
     function() local t = TE_Text(); return t and (t.size or 14) end,
     function(v) local t = TE_Text(); if t then t.size = v end end)
 
   -- Outline + Anchor dropdowns.
-  teRows[#teRows + 1] = MakeDropdown(f, 16, -182, 160, "Outline: ", TE_OUTLINE,
+  teRows[#teRows + 1] = MakeDropdown(f, 16, -212, 160, "Outline: ", TE_OUTLINE,
     function() local t = TE_Text(); return (t and t.outline) or "OUTLINE" end,
     function(v) local t = TE_Text(); if t then t.outline = (v ~= "OUTLINE") and v or nil end end)
-  teRows[#teRows + 1] = MakeDropdown(f, 200, -182, 164, "Anchor: ", TE_ANCHOR,
+  teRows[#teRows + 1] = MakeDropdown(f, 200, -212, 164, "Anchor: ", TE_ANCHOR,
     function() local t = TE_Text(); return (t and t.anchor) or "BOTTOM" end,
     function(v) local t = TE_Text(); if t then t.anchor = (v ~= "BOTTOM") and v or nil end end)
 
   -- Colour.
-  teRows[#teRows + 1] = MakeColor(f, 16, -214,
+  teRows[#teRows + 1] = MakeColor(f, 16, -244,
     function() local t = TE_Text(); return t and t.color end,
     function(v) local t = TE_Text(); if t then t.color = v end end)
 
   -- X / Y offset (added on top of the anchor's base position).
-  teRows[#teRows + 1] = MakeSlider(f, -244, "X Offset", -400, 400, 2,
+  teRows[#teRows + 1] = MakeSlider(f, -274, "X Offset", -400, 400, 2,
     function() local t = TE_Text(); return t and (t.x or 0) end,
     function(v) local t = TE_Text(); if t then t.x = (v ~= 0) and v or nil end end)
-  teRows[#teRows + 1] = MakeSlider(f, -276, "Y Offset", -400, 400, 2,
+  teRows[#teRows + 1] = MakeSlider(f, -306, "Y Offset", -400, 400, 2,
     function() local t = TE_Text(); return t and (t.y or 0) end,
     function(v) local t = TE_Text(); if t then t.y = (v ~= 0) and v or nil end end)
 

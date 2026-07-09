@@ -145,6 +145,27 @@ function D:GetOrCreate(spellID)
   return f
 end
 
+-- The charge-count string for a count-mode text overlay: the exact number when it's secret-safely
+-- known (the endpoints max/0 always are; the middle only for 2-charge spells), else "" (a 3+
+-- charge spell mid-recharge is genuinely unreadable). Resolves the spell via DisplayChargeSpell.
+function D:CountString(cfg)
+  if not (GA.CDM and GA.CDM.DisplayChargeSpell) then return "" end
+  local sid = GA.CDM:DisplayChargeSpell(cfg)
+  if not sid then return "" end
+  local n = GA.CDM:ChargeCount(sid)
+  return (n ~= nil) and tostring(n) or ""
+end
+
+-- Live-refresh a count-mode overlay's number without redoing font/anchor — called from
+-- RefreshDisplays on charge transitions. No-op unless the display is shown + in count mode.
+function D:RefreshCountText(spellID)
+  local f = self.frames[spellID]
+  if not f or not f.label then return end
+  local cfg = self:Config(spellID); local t = cfg and cfg.text
+  if not (t and t.show ~= false and t.showCount) then return end
+  f.label:SetText(self:CountString(cfg))
+end
+
 function D:ApplyConfig(spellID)
   local f = self.frames[spellID]
   local cfg = self:Config(spellID)
@@ -197,7 +218,12 @@ function D:ApplyConfig(spellID)
   local show
   if t then show = (t.show ~= false) else show = (cfg.showLabel ~= false) end
   if show then
-    local str = (t and t.str and t.str ~= "" and t.str) or cfg.label or tostring(cfg.spellID or spellID)
+    local str
+    if t and t.showCount then
+      str = self:CountString(cfg)                 -- live charge count (Pass 2), overrides custom text
+    else
+      str = (t and t.str and t.str ~= "" and t.str) or cfg.label or tostring(cfg.spellID or spellID)
+    end
     local font = (t and t.font) or (GA.FONT and GA.FONT.body) or (STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF")
     local fallbackFont = STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF"
     local size = (t and t.size) or 14
