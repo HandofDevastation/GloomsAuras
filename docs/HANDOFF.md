@@ -1,4 +1,4 @@
-# GloomsAuras — Session Handoff  (last updated 2026-07-08)
+# GloomsAuras — Session Handoff  (last updated 2026-07-09)
 
 **New session: read this file first, then `docs/API-NOTES.md`, then `docs/REQUIREMENTS.md`,
 then `CLAUDE.md`.** The vendored WoW skill lives in `docs/wow-addon-dev/`. This file is the
@@ -583,19 +583,27 @@ one step per QA pass; never declare done before he confirms in-game.**
 - **Phase 3 — Profiles.** ✅ **DONE + QA'd 2026-07-08** (see BUILT list): schema-2 migration + `GA.global`/
   `GA.db` split (`fc41649`), switcher UI (`6deae65`). Feature complete; nothing left open here.
 
-### ▶▶ START HERE NEXT SESSION
-**Fifth session (2026-07-08) shipped the big secret-safe wins — DoT/target-debuff tracking, Aimed Shot charge
-availability, and the two-panel trigger picker — all committed + pushed (see ACTIVE THREAD + fifth-session
-note).** Highest-priority OPEN items:
+### ▶▶ START HERE NEXT SESSION — BUILD THE BAR DISPLAY TYPE (Duration-first)
 
-**A. Finish verifying the CDM-tracking work (ACTIVE THREAD above has full detail):**
-- ~~**Instance / M+ / raid check**~~ ✅ **BANKED (2026-07-08, sixth session)** — follower dungeon passed; behaved
-  identically to open-world combat (auras readable, cooldowns secret-in-combat as always). Jason's call: rules
-  don't vary by content tier, so sufficient. See QA STATUS #3.
-- ~~**Deathblow / proc (`hasAura=false`) tracking**~~ ✅ **PASSED (2026-07-09, sixth session)** — proc buff
-  lights up through the normal buff mirror; no separate activation path needed. See QA STATUS #4.
-- **Exact charge COUNT** — revisit (2-charge spells can derive it from the charge shadow; backlog item below).
-  **← the only Track-A item left; everything else here is verified.**
+**The seventh session's job: build the new "Bar" display type. Full design is written up in
+[docs/BARS-DESIGN.md](BARS-DESIGN.md) — READ IT FIRST.** Decided with Jason (2026-07-09): a Bar is a new
+display *kind* (`cfg.kind="bar"`) that reuses the whole display pipeline (list/position/trigger/visibility/
+group/sound) and only swaps the *rendering* to a StatusBar. Three modes: **Aura Duration** (build FIRST —
+Jason's DoT timers), **Cooldown Duration**, **Stacks**. All secret-safe by the same rule ("feed the widget,
+never read the raw value"): duration OBJECTS → `StatusBar:SetTimerDuration` (does NOT throw in combat, §9.3 +
+ArcUI); stack count → `SetValue` (renders even when secret). **Build order + data model + engine are all in
+the design doc.** First slice: bar rendering + Aura-Duration mode, QA'd on Warlock DoTs.
+
+- **Parallel track — UI reorg in Figma.** Jason is mocking up a redesigned UI in Figma (the addon is getting
+  bloated; see [[avoid-ui-bloat]] memory). Design tokens were handed off as a **style-guide artifact**:
+  https://claude.ai/code/artifact/f49b70bb-72e4-4cfc-b6a5-48cb92f0b9a1 (color/type/panel dims, in-brand).
+  The Bar work should introduce a **type-aware editor** (bar displays show bar controls, textures show texture
+  controls) — the first concrete declutter step. Reconcile with Jason's Figma design as it lands.
+
+**Everything below is verified/shipped this session (context only):**
+- ~~**Instance / M+ / raid check**~~ ✅ BANKED (follower dungeon = open-world-equiv; Jason's call). QA STATUS #3.
+- ~~**Deathblow / proc tracking**~~ ✅ PASSED — proc lights up via the buff mirror. QA STATUS #4.
+- ~~**Exact charge COUNT**~~ ✅ **SHIPPED (Pass 1 conditions + Pass 2 text; `3ada124`, `849a75c`)** — see BUILT list.
 
 **B. Then resume the EFFECTS/appearance push** (Glow ✅ + grouped triggers ✅ + eye-preview/Disabled ✅ shipped):
 0. ~~**⚠ QA a GROUPED trigger IN COMBAT first.**~~ ✅ **DONE + QA'd (2026-07-08, sixth session; Hunter/dummy).**
@@ -619,15 +627,37 @@ note).** Highest-priority OPEN items:
   moving trigger state to `C._trig` — see LEARNINGS): put new drawer state/functions on the `C` table,
   controls as Build-locals.
 
-### Exact charge COUNT (Jason-requested revisit, after charge-availability build)
-The shadow build gives "≥1 available." Getting the EXACT count is PARTLY possible, secret-safely:
-- **2-charge spells (Aimed Shot):** the TWO shadows already distinguish all three states — 2=`main F,charge F`;
-  1=`main F,charge T`; 0=`main T,charge T`. So exact count (0/1/2) is DERIVABLE for free from what we build.
-- **3+ charge spells:** middle counts COLLAPSE (1 and 2 both read `main F, charge T` = "available, recharging"),
-  so exact count is NOT derivable — best is full / partial / empty buckets. (`GetSpellCharges().currentCharges`
-  and `GetSpellCastCount` are both SECRET in combat — confirmed in probe — so no direct read.)
-Revisit: expose a charge-count signal (works fully for 2-charge, degrades to buckets for 3+). Explore
-`C_Secrets` predicates only if buckets aren't enough (they return SECRET booleans → need a widget sink).
+### Exact charge COUNT — ✅ SHIPPED (2026-07-09, sixth session; `3ada124` engine+conditions, `849a75c` text)
+Two hidden shadow Cooldowns per charge spell: shadow A (real cd → availability, existing) + shadow B (fed
+`GetSpellChargeDuration` → "at max?"). Together they read the count: max={A hidden,B hidden}; partial={A
+hidden,B shown}; 0={A shown,B shown}. **Exact for 2-charge (Aimed Shot 2/1/0); full/partial/empty buckets for
+3+** (middle unreadable in combat). `CDM:ChargeCount(sid)` exposes it. **Pass 1** = two new trigger states
+`charges_max` / `charges_notmax` ("at max charges" / "NOT at max charges"), reached by cycling a charge-spell
+cooldown condition's state label (4-state cycle). **Pass 2** = a "Charge count" switch in the Text drawer that
+shows the live count as text (`DisplayChargeSpell` resolves which spell). Both QA'd on the Hunter.
+- **LEARNING (fixed a latent Discover gap):** charge-ness was classified only inside the frame-match loop, but
+  an idle Essential cooldown's frame is hidden (`hideWhenInactive` clears its cooldownID → `GetCooldownInfo`
+  nil → no match), so an idle-OOC Aimed Shot never got `isCharge`/shadow set (→ no charge states in the UI).
+  Fix: a frame-INDEPENDENT fallback in Discover that classifies watched charge cooldowns from `GetSpellCharges`
+  (maxCharges persists cached from OOC) and sets up the shadow. Also hardens Aimed Shot's regular availability.
+
+### ▶ Stacks / Freezing investigation — DONE (feeds the Bar work). Probe extended: `7c2c9cd`.
+Jason's Frost Mage tracks a stacking target debuff **Freezing (spellID 1246769; CDM lists it under the
+cooldown name "Shatter", cooldownID 93744; stacks to 20)**. Findings from `/ga probe` (extended with a
+`stacks: player[..] target[..]` line reading aura `applications` + issecret):
+- **Stack count is PLAIN out of combat, SECRET in combat** (C4 `target[PLAIN=20]` OOC; C2/C3
+  `target[SECRET(number)]` in combat). Same secrecy pattern as everything else.
+- **The debuff lives on the TARGET despite `selfAura=true`** (`aura: player[absent] target[PRESENT:Freezing]`)
+  — so `selfAura` is misleading here; read the unit where the auraInstanceID actually resolves. (This is why
+  GA labels it "buff on you" but it correctly fires on the target — `IsActive()` is computed secure-side.)
+- **Implication:** a stacks/duration **DISPLAY (bar)** is feasible (feed the widget the secret value/duration
+  object). A **"stacks ≥ X" TRIGGER in combat is NOT** (comparing a secret throws; no known widget sink for a
+  threshold — the charge shadow works only because a cooldown duration maps to a widget's shown-state). This
+  motivated the **Bar display type** (see BARS-DESIGN.md) — build DISPLAY, not a stacks-threshold trigger.
+- **Naming quirk to fix (backlog):** the CDM shows the cooldown's name ("Shatter") not the aura's ("Freezing")
+  → the "override display" polish + "on target" wording fix should land with the Bar work.
+
+### Trigger-chooser UX — ✅ DONE + QA'd (2026-07-08). Two-panel picker (Config.lua).
 
 ### Trigger-chooser UX — ✅ DONE + QA'd (2026-07-08). Two-panel picker (Config.lua).
 Rewrote the condition picker (`BuildAuraLists` + BuildPicker/RefreshPicker on `C._pick`): **two columns** —
@@ -669,6 +699,10 @@ real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears
   tracks these DoTs correctly — the reference implementation for the §9 approach. The Hunter below is still
   relevant for the charge (Aimed Shot) work. **QA discipline reminder: he wants to be thorough; frame every
   build as a hypothesis to verify in-game, never as done.**
+- Jason also plays a **Frost Mage** (added 2026-07-09, for the stacks/bars work). Core mechanic: **Freezing**,
+  a stacking **target debuff** (spellID **1246769**; the CDM lists it under the linked cooldown **"Shatter",
+  cooldownID 93744**; stacks to **20**, consumed 6-at-a-time by Ice Lance). He has an ArcUI segmented bar for
+  it. This is the reference case for the Stacks bar mode (see the Stacks investigation above + BARS-DESIGN.md).
 - Jason plays **Marksmanship Hunter** (**Dark Ranger** hero talents) on char **"Gloomvale - Stormrage"** (its
   profile holds the Hunter auras). Relevant IDs: Trick Shots buff
   **257621**, Rapid Fire **257044** (non-charge cd, works), Aimed Shot **19434** (2 charges — availability
@@ -691,8 +725,18 @@ real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears
   **data provider** `GetOrderedCooldownIDsForCategory` (see the picker LEARNING above). Both columns QA'd correct.
   (4) **Deathblow / proc verified** — a `hasAura=false` activation proc DOES light up through the normal buff
   mirror; no separate activation path needed (QA STATUS #4). (5) **Doc fix:** the Warlock is **Gloomwick**, the
-  Hunter is **Gloomvale** (handoff had them swapped). Only Track-A item left = exact charge COUNT (a backlog
-  build, not a correctness gap). No open bugs. Config.lua chunk 184/200 locals.
+  Hunter is **Gloomvale** (handoff had them swapped).
+  **Then the session kept going (it was LONG):** (6) **Exact charge COUNT shipped** — Pass 1 (trigger states
+  `charges_max`/`charges_notmax`, `3ada124`) + Pass 2 (Charge-count text overlay, `849a75c`), QA'd on the
+  Hunter; also fixed a latent frame-independent-classification gap in Discover (see the charge-COUNT section).
+  (7) **Stacks/Freezing investigation** — extended `/ga probe` to read aura stack `applications` (`7c2c9cd`);
+  proved the count is PLAIN OOC / SECRET in combat, and that Freezing lives on the TARGET despite selfAura=true
+  (see the Stacks section). (8) **Bar display type — DESIGN PASS done** ([docs/BARS-DESIGN.md](BARS-DESIGN.md)):
+  a new display *kind* with Aura-Duration / Cooldown-Duration / Stacks modes; **build Duration-first next
+  session.** (9) **UI/Figma:** Jason flagged the UI is getting bloated ([[avoid-ui-bloat]] memory) and is
+  redesigning it in Figma; handed him a design-token **style-guide artifact** (URL in START HERE). The Bar work
+  introduces a type-aware editor as the first declutter step. **No open bugs. Config.lua chunk 184/200 locals.**
+  **All committed + pushed at session end.**
 - **Session end 2026-07-08 (fifth session) — the "secret-safe signals" session. BIG.** Reverse-engineered
   **ArcUI** (installed, readable) and cracked two things we'd previously called walls. Built a read-only
   probe (`/ga probe` + a movable `/ga capture` button, logging to `probeLog` → Claude reads it off disk) and
