@@ -402,6 +402,9 @@ local function SlashHandler(input)
     print("  |cffffd200/ga hidecdm|r            — hide/show Blizzard's Cooldown Manager")
     print("  |cffffd200/ga trace|r              — per-display trigger diagnostic")
     print("  |cffffd200/ga debug|r              — Cooldown Manager diagnostics")
+    print("  |cffffd200/ga probe [filter]|r     — deep secret-safe signal dump → saved to file")
+    print("  |cffffd200/ga capture|r            — movable CAPTURE button (click at each state)")
+    print("  |cffffd200/ga probe clear|r        — wipe the saved probe log")
   elseif cmd == "add" then
     AddDisplay(rest)
   elseif cmd == "remove" or cmd == "delete" then
@@ -437,6 +440,24 @@ local function SlashHandler(input)
     if GA.CDM and GA.CDM.Trace then GA.CDM:Trace() else msg("CDM engine not ready yet.") end
   elseif cmd == "debug" then
     if GA.CDM and GA.CDM.Debug then GA.CDM:Debug() else msg("CDM engine not ready yet.") end
+  elseif cmd == "probe" then
+    if rest == "clear" then
+      if _G.GloomsAurasDB then _G.GloomsAurasDB.probeLog = nil end
+      if GA.CDM and GA.CDM._UpdateCaptureButton then GA.CDM:_UpdateCaptureButton() end
+      msg("probe log cleared.")
+    elseif GA.CDM and GA.CDM.Probe then
+      GA.CDM:Probe(rest)
+    else
+      msg("CDM engine not ready yet.")
+    end
+  elseif cmd == "capture" then
+    if GA.CDM and GA.CDM.ToggleCaptureButton then
+      local shown = GA.CDM:ToggleCaptureButton()
+      msg("capture button " .. (shown and "|cff55ff55shown|r" or "|cffff5555hidden|r") ..
+          ". Click it at each state, then |cffffd200/reload|r so I can read the log.")
+    else
+      msg("CDM engine not ready yet.")
+    end
   else
     msg("unknown command '" .. cmd .. "'. Try |cffffd200/ga help|r")
   end

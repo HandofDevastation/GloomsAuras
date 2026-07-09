@@ -22,8 +22,13 @@ local SOUND_ON_SHOW = (SOUNDKIT and SOUNDKIT.RAID_WARNING) or 8959
 local THROTTLE = 1.0  -- seconds; min gap between sounds per display
 
 CDM.frameToSpell   = {} -- CDM item frame -> spellID (rebuilt on Discover)
+CDM.frameKind      = {} -- CDM item frame -> "buff" | "cooldown" (per-FRAME role). A spell placed
+                        -- in TWO viewers (e.g. Haunt in Essential AND BuffBar) gets one frame of
+                        -- each; routing state by this (not by the per-spell `kind`) stops the
+                        -- cooldown frame from clobbering the aura frame's buffActive, and back.
 CDM.lastPlay       = {} -- spellID -> GetTime() of last sound
-CDM.kind           = {} -- spellID -> "buff" | "cooldown"
+CDM.kind           = {} -- spellID -> "buff" | "cooldown" (per-SPELL; drives only the no-trigger
+                        -- AUTO path; aura wins when a spell is enrolled as both)
 CDM.available      = {} -- spellID -> bool (cooldown ready?), mirrored from Blizzard
 CDM.cdFrameToSpell = {} -- Blizzard cooldown widget -> spellID (rebuilt on Discover)
 CDM.cdFrameToItem  = {} -- Blizzard cooldown widget -> CDM item frame (rebuilt on Discover)
@@ -292,7 +297,7 @@ end
 -- a secret value is skipped, leaving the last-known (hook-provided) value.
 function CDM:SyncCooldowns()
   for frame, sid in pairs(self.frameToSpell) do
-    if self.kind[sid] == "cooldown" and not self.isCharge[sid] then
+    if self.frameKind[frame] == "cooldown" and not self.isCharge[sid] then
       local v = frame.isOnActualCooldown
       if type(v) == "boolean" and not issecret(v) then
         self.available[sid] = not v
@@ -383,7 +388,11 @@ end
 -- Active-state change on a bound CDM item frame -> drive the display.
 local function OnItemActiveChanged(itemFrame)
   local spellID = CDM.frameToSpell[itemFrame]
-  if not spellID or CDM.kind[spellID] ~= "buff" then return end
+  -- Route by the FRAME's role, not the spell's. A spell enrolled as BOTH a cooldown
+  -- (Essential/Utility) and an aura (Buff/Bar) has two frames both hooked here; only the
+  -- AURA frame may drive buffActive. Gating on CDM.kind[spellID] let the cooldown frame's
+  -- IsActive (its own recharge state) overwrite the DoT state = the "goes random" bug.
+  if not spellID or CDM.frameKind[itemFrame] ~= "buff" then return end
   local ok, active = pcall(itemFrame.IsActive, itemFrame)
   if not ok then return end
   if issecret(active) then
@@ -397,6 +406,8 @@ end
 -- (Re)bind every configured display to its CDM item frame + hook + initial sync.
 function CDM:Discover()
   wipe(self.frameToSpell)
+  wipe(self.frameKind)
+  wipe(self.kind)         -- re-derived below; wiped so a spell that moved viewers/spec re-classifies
   wipe(self.cdFrameToSpell)
   wipe(self.cdFrameToItem)
   wipe(self.isCharge)
@@ -420,7 +431,10 @@ function CDM:Discover()
         local kind = "buff"
         local cat = info.category
         if cat ~= nil and not issecret(cat) and (cat == 0 or cat == 1) then kind = "cooldown" end
-        self.kind[spellID] = kind
+        self.frameKind[frame] = kind                        -- per-FRAME role (unambiguous)
+        -- Per-SPELL kind drives only the no-trigger AUTO path. When a spell is enrolled as
+        -- BOTH cooldown + aura, let the AURA win so "auto-show on this spell" means its aura.
+        if self.kind[spellID] ~= "buff" then self.kind[spellID] = kind end
 
         -- Hook active-state changes (buff up/down) once per frame object.
         if not frame.__gaHooked and type(frame.OnActiveStateChanged) == "function" then
@@ -770,4 +784,268 @@ function CDM:ReportCharges()
     end
   end
   print("  |cff55ff55Tracked Buffs / Bars always work|r (via 'buff is active').")
+end
+
+-- --------------------------------------------------------------------------
+-- /ga probe [filter] — EXHAUSTIVE read-only diagnostic for the "secret-safe
+-- signals" investigation (see docs: ArcUI mirrors the same CDM but tracks DoTs
+-- via the native frame.auraInstanceID + C_UnitAuras, and charge readiness via a
+-- hidden shadow Cooldown fed a duration object). For EVERY item in all four
+-- viewers it dumps: the config struct (selfAura/hasAura/charges), which aura-
+-- instance hook methods the frame exposes, the native auraInstanceID (value /
+-- secret? / present?), a live C_UnitAuras presence + duration probe on BOTH
+-- player and target, the item's cooldown fields, and a shadow-Cooldown readiness
+-- read. Read-only; every risky read is issecret-guarded or pcall-wrapped so it
+-- CANNOT throw in combat. `filter` (spell-name substring or spellID) narrows it.
+-- --------------------------------------------------------------------------
+
+-- Two reusable invisible Cooldown widgets: feed them a duration OBJECT (secret-
+-- safe) and read IsShown() — a plain boolean — to learn cooldown/charge state
+-- without ever reading a secret number (the "Aimed Shot" technique).
+function CDM:_ProbeShadows()
+  if not self._probeMainCD then
+    local function mk()
+      local cd = CreateFrame("Cooldown", nil, UIParent, "CooldownFrameTemplate")
+      if cd.SetDrawSwipe then cd:SetDrawSwipe(false) end
+      if cd.SetDrawEdge then cd:SetDrawEdge(false) end
+      if cd.SetHideCountdownNumbers then cd:SetHideCountdownNumbers(true) end
+      return cd
+    end
+    self._probeMainCD, self._probeChargeCD = mk(), mk()
+  end
+  return self._probeMainCD, self._probeChargeCD
+end
+
+function CDM:Probe(filter)
+  local f    = (filter and filter ~= "") and filter:lower() or nil
+  local fNum = filter and tonumber(filter) or nil
+
+  -- Format ANY value without tripping the secret-value wall.
+  local function pval(v)
+    if v == nil then return "nil" end
+    if issecret(v) then return "SECRET("..type(v)..")" end
+    local t = type(v)
+    if t == "string" then return '"'..v..'"' end
+    if t == "number" or t == "boolean" then return tostring(v) end
+    return "<"..t..">"
+  end
+  -- ArcUI's HasAuraInstanceID: presence WITHOUT reading (secret non-nil = present).
+  local function present(v)
+    if v == nil then return false end
+    if issecret(v) then return true end
+    if type(v) == "number" and v == 0 then return false end
+    return true
+  end
+  local function meth(frame, name) return type(frame[name]) == "function" and "y" or "-" end
+  -- Live presence check: is this aura instance on `unit` right now?
+  local function unitAura(unit, aiid)
+    if not (C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID) then return "noAPI" end
+    if not UnitExists(unit) then return "no-"..unit end
+    if not present(aiid) then return "noID" end
+    local ok, data = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, aiid)
+    if not ok then return "THREW" end
+    if data == nil then return "absent" end
+    if issecret(data) then return "PRESENT(secretData)" end
+    local nm
+    pcall(function() if type(data) == "table" and data.name and not issecret(data.name) then nm = data.name end end)
+    return "PRESENT"..(nm and (":"..nm) or "")
+  end
+  local function auraDur(unit, aiid)
+    if not (C_UnitAuras and C_UnitAuras.GetAuraDuration) then return "noAPI" end
+    if not UnitExists(unit) then return "no-"..unit end
+    if not present(aiid) then return "noID" end
+    local ok, d = pcall(C_UnitAuras.GetAuraDuration, unit, aiid)
+    if not ok then return "THREW" end
+    if d == nil then return "nil" end
+    return "obj:"..type(d)
+  end
+
+  local inCombat = InCombatLockdown() and true or false
+  local tName = UnitExists("target") and (UnitName("target") or "?") or "<none>"
+  local spec = "?"
+  pcall(function()
+    local i = GetSpecialization and GetSpecialization()
+    local _, nm = i and GetSpecializationInfo and GetSpecializationInfo(i)
+    if nm then spec = nm end
+  end)
+
+  -- Register this capture up-front in the SavedVariables log so the deferred
+  -- (+0.1s) shadow lines land in the SAVED copy too. It flushes to disk on
+  -- /reload or logout; Claude then reads it straight from the file. Trimmed to
+  -- the last 40. `emit` BOTH prints (live view) and appends (for the file).
+  local cap = { combat = inCombat, target = tName, spec = spec, filter = filter, gt = GetTime(), lines = {} }
+  local root = _G.GloomsAurasDB
+  if type(root) == "table" then
+    root.probeLog = root.probeLog or {}
+    root.probeLog[#root.probeLog + 1] = cap
+    while #root.probeLog > 40 do table.remove(root.probeLog, 1) end
+    cap.n = #root.probeLog
+  end
+  local function emit(s) print(s); cap.lines[#cap.lines + 1] = s end
+
+  GA.msg(("=== GA PROBE #%s stored (also saved to SavedVariables) ==="):format(tostring(cap.n or "?")))
+  emit(("=== PROBE #%s | combat=%s spec=%s target=%s ==="):format(tostring(cap.n or "?"), tostring(inCombat), spec, tName))
+  local UA, CS = C_UnitAuras or {}, C_Spell or {}
+  emit(("  API: ByInstanceID=%s GetAuraDuration=%s ChargeDuration=%s CooldownDuration=%s"):format(
+    tostring(type(UA.GetAuraDataByAuraInstanceID) == "function"),
+    tostring(type(UA.GetAuraDuration) == "function"),
+    tostring(type(CS.GetSpellChargeDuration) == "function"),
+    tostring(type(CS.GetSpellCooldownDuration) == "function")))
+  if filter and filter ~= "" then emit(("  filter: %s"):format(filter)) end
+
+  local main, charge
+  pcall(function() main, charge = self:_ProbeShadows() end)
+
+  local viewers = {
+    { "Essential", EssentialCooldownViewer }, { "Utility",  UtilityCooldownViewer },
+    { "BuffIcon",  BuffIconCooldownViewer },  { "BuffBar",  BuffBarCooldownViewer },
+  }
+  for _, vv in ipairs(viewers) do
+    local vname, viewer = vv[1], vv[2]
+    if viewer then
+      local n = 0; ForEachItem(viewer, function() n = n + 1 end)
+      emit(("|cff936bff[%s]|r %d item(s)"):format(vname, n))
+      local k = 0
+      ForEachItem(viewer, function(frame)
+        k = k + 1
+        local info; pcall(function() info = frame.GetCooldownInfo and frame:GetCooldownInfo() end)
+        local sid = info and info.spellID
+        local name = "?"
+        if sid and not issecret(sid) and type(sid) == "number" and C_Spell and C_Spell.GetSpellName then
+          name = C_Spell.GetSpellName(sid) or "?"
+        end
+
+        -- filter: skip unless name-substring or spellID matches
+        if f or fNum then
+          local hit = false
+          if f and type(name) == "string" and name:lower():find(f, 1, true) then hit = true end
+          if fNum and type(sid) == "number" and sid == fNum then hit = true end
+          if not hit then return end
+        end
+
+        local aiid  = frame.auraInstanceID
+        local selfA = info and info.selfAura
+        local expUnit = "?"
+        if selfA ~= nil and not issecret(selfA) then expUnit = (selfA == true) and "player" or "target" end
+
+        emit(("  #%d |cffffd200%s|r (%s) cat=%s"):format(k, tostring(name), pval(sid), pval(info and info.category)))
+        emit(("     struct: selfAura=%s hasAura=%s charges=%s isKnown=%s override=%s"):format(
+          pval(selfA), pval(info and info.hasAura), pval(info and info.charges),
+          pval(info and info.isKnown), pval(info and info.overrideSpellID)))
+        emit(("     methods: SetAIInfo=%s AIInfoSet=%s AIInfoCleared=%s RefreshData=%s GetCDFrame=%s IsActive=%s"):format(
+          meth(frame, "SetAuraInstanceInfo"), meth(frame, "OnAuraInstanceInfoSet"),
+          meth(frame, "OnAuraInstanceInfoCleared"), meth(frame, "RefreshData"),
+          meth(frame, "GetCooldownFrame"), meth(frame, "IsActive")))
+        local shown, active = "?", "?"
+        pcall(function() shown = tostring(frame:IsShown()) end)
+        pcall(function() local ok, a = pcall(frame.IsActive, frame); active = ok and pval(a) or "THREW" end)
+        emit(("     frame: IsShown=%s IsActive=%s | auraInstanceID=%s present=%s | expUnit=%s"):format(
+          shown, active, pval(aiid), tostring(present(aiid)), expUnit))
+        emit(("     aura: player[%s] target[%s] | dur player[%s] target[%s]"):format(
+          unitAura("player", aiid), unitAura("target", aiid), auraDur("player", aiid), auraDur("target", aiid)))
+        emit(("     cd: isOnActualCooldown=%s cooldownIsActive=%s isOnGCD=%s startTime=%s"):format(
+          pval(frame.isOnActualCooldown), pval(frame.cooldownIsActive),
+          pval(frame.isOnGCD), pval(frame.cooldownStartTime)))
+
+        -- shadow readiness (immediate; IsShown may lag one frame — see deferred pass below)
+        if sid and not issecret(sid) and type(sid) == "number" and main and charge then
+          local function feed(cd, durFn)
+            if type(durFn) ~= "function" or not cd then return "noAPI" end
+            if cd.SetCooldown then pcall(cd.SetCooldown, cd, 0, 0) end
+            local ok, durObj = pcall(durFn, sid, true)
+            if not ok then return "THREWget" end
+            if durObj == nil then return "noDur" end
+            if not cd.SetCooldownFromDurationObject then return "noSetter" end
+            if not pcall(cd.SetCooldownFromDurationObject, cd, durObj, true) then return "THREWset" end
+            local s = "?"; pcall(function() s = tostring(cd:IsShown()) end)
+            return "shown="..s
+          end
+          emit(("     shadow: mainCD[%s] chargeCD[%s]"):format(
+            feed(main, CS.GetSpellCooldownDuration), feed(charge, CS.GetSpellChargeDuration)))
+        end
+
+        -- charge-flagged items get a deep test: FRESH shadows + a deferred read
+        -- (the +0.1s catches IsShown() lag). On non-charge spells this is skipped.
+        if info and info.charges == true and not issecret(info.charges)
+           and sid and not issecret(sid) and type(sid) == "number" and CS.GetSpellChargeDuration then
+          local fmain = CreateFrame("Cooldown", nil, UIParent, "CooldownFrameTemplate")
+          local fchg  = CreateFrame("Cooldown", nil, UIParent, "CooldownFrameTemplate")
+          for _, cd in ipairs({ fmain, fchg }) do
+            if cd.SetDrawSwipe then cd:SetDrawSwipe(false) end
+            if cd.SetHideCountdownNumbers then cd:SetHideCountdownNumbers(true) end
+          end
+          pcall(function()
+            local d1 = CS.GetSpellCooldownDuration and CS.GetSpellCooldownDuration(sid, true)
+            local d2 = CS.GetSpellChargeDuration(sid, true)
+            if d1 and fmain.SetCooldownFromDurationObject then fmain:SetCooldownFromDurationObject(d1, true) end
+            if d2 and fchg.SetCooldownFromDurationObject then fchg:SetCooldownFromDurationObject(d2, true) end
+          end)
+          local nm = name
+          C_Timer.After(0.1, function()
+            local ms, cs2 = "?", "?"
+            pcall(function() ms = tostring(fmain:IsShown()) end)
+            pcall(function() cs2 = tostring(fchg:IsShown()) end)
+            emit(("     |cffffd200shadow(+0.1s) %s: mainShown=%s chargeShown=%s|r  (main+charge shown=0 charges; main hidden+charge shown=1+ available)"):format(
+              tostring(nm), ms, cs2))
+          end)
+        end
+      end)
+    end
+  end
+  emit("  Capture 5 states: (1) OOC no target (2) target dummy A, no DoT (3) DoTs on A, in combat (4) swap to dummy B (5) swap back to A. Watch auraInstanceID/present + aura:target across states.")
+  if CDM._captureBtn then CDM:_UpdateCaptureButton() end
+end
+
+-- --------------------------------------------------------------------------
+-- /ga capture — a small movable click button so you can fire a probe at an exact
+-- game state (mid-combat, right after a target swap) without typing. Each click
+-- runs CDM:Probe() (full dump) → prints + appends to the SavedVariables log.
+-- Do all your captures, then /reload once, and the file has every one of them.
+-- Styled with our own textures (no Blizzard chrome, per house style).
+-- --------------------------------------------------------------------------
+function CDM:_UpdateCaptureButton()
+  local b = self._captureBtn
+  if not b then return end
+  local root = _G.GloomsAurasDB
+  local count = (type(root) == "table" and type(root.probeLog) == "table") and #root.probeLog or 0
+  b.count:SetText(("%d captured"):format(count))
+end
+
+function CDM:ToggleCaptureButton()
+  local b = self._captureBtn
+  if b then
+    if b:IsShown() then b:Hide() else b:Show(); self:_UpdateCaptureButton() end
+    return b:IsShown()
+  end
+
+  b = CreateFrame("Frame", "GloomsAurasCaptureButton", UIParent)
+  b:SetSize(150, 70)
+  b:SetPoint("CENTER", 0, -120)
+  b:SetFrameStrata("DIALOG")
+  b:EnableMouse(true)
+  b:SetMovable(true)
+  b:RegisterForDrag("LeftButton")
+  b:SetScript("OnDragStart", b.StartMoving)
+  b:SetScript("OnDragStop", b.StopMovingOrSizing)
+  local bg = b:CreateTexture(nil, "BACKGROUND"); bg:SetAllPoints(); bg:SetColorTexture(0.04, 0.03, 0.07, 0.92)
+  local edge = b:CreateTexture(nil, "BORDER"); edge:SetPoint("TOPLEFT", -1, 1); edge:SetPoint("BOTTOMRIGHT", 1, -1)
+  edge:SetColorTexture(0.576, 0.42, 1, 0.5)  -- purple frame accent
+
+  local title = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  title:SetPoint("TOP", 0, -6); title:SetText("|cff936bffGA Probe|r  (drag)")
+
+  local hit = CreateFrame("Button", nil, b)
+  hit:SetPoint("TOPLEFT", 8, -22); hit:SetPoint("BOTTOMRIGHT", -8, 8)
+  local hbg = hit:CreateTexture(nil, "ARTWORK"); hbg:SetAllPoints(); hbg:SetColorTexture(0.576, 0.42, 1, 0.85)
+  hit:SetScript("OnEnter", function() hbg:SetColorTexture(0.66, 0.52, 1, 1) end)
+  hit:SetScript("OnLeave", function() hbg:SetColorTexture(0.576, 0.42, 1, 0.85) end)
+  local lbl = hit:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+  lbl:SetPoint("CENTER", 0, 5); lbl:SetText("CAPTURE"); lbl:SetTextColor(0, 0, 0)
+  b.count = hit:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  b.count:SetPoint("CENTER", 0, -11); b.count:SetTextColor(0, 0, 0)
+  hit:SetScript("OnClick", function() CDM:Probe() end)
+
+  self._captureBtn = b
+  self:_UpdateCaptureButton()
+  return true
 end
