@@ -275,9 +275,14 @@ function D:UpdateBar(spellID)
     return
   end
 
-  -- Default: aura_dur — feed the source aura's duration OBJECT so the bar self-drains.
-  if not GA.CDM.BarDurationObject then return end
-  local durObj = GA.CDM:BarDurationObject(cfg)
+  -- Duration modes (aura_dur / cd_dur): feed a duration OBJECT so the bar self-drains. Same feed
+  -- code — only the object's source differs (the source aura's remaining vs the spell's cooldown).
+  local durObj
+  if b.mode == "cd_dur" then
+    durObj = GA.CDM.CdDurationObject and GA.CDM:CdDurationObject(cfg.spellID)
+  else
+    durObj = GA.CDM.BarDurationObject and GA.CDM:BarDurationObject(cfg)
+  end
   if not durObj then return end
   if not (Enum and Enum.StatusBarInterpolation and Enum.StatusBarTimerDirection and f.bar.SetTimerDuration) then return end
   local dir = (b.fill == "fill") and Enum.StatusBarTimerDirection.ElapsedTime

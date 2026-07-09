@@ -71,6 +71,8 @@ CDM.chargeRecharge = {} -- spellID -> 2nd shadow fed the RECHARGE timer: shown w
 CDM.chargesFull    = {} -- spellID -> bool (AT MAX charges? = recharge shadow hidden); nil = unknown
 CDM.auraUnit       = {} -- spellID -> "player"|"target" (from the item's non-secret selfAura, at
                         -- Discover). Which unit a Bar display's aura_dur source resolves on.
+CDM.cdBarShadow    = {} -- spellID -> hidden Cooldown widget: a cd_dur Bar's show/hide signal. Fed
+                        -- the spell's cooldown duration object; IsShown()==on real cooldown.
 
 local VIEWER_NAME_BY_CATEGORY = {
   [0] = "EssentialCooldownViewer", [1] = "UtilityCooldownViewer",
@@ -281,7 +283,10 @@ function CDM:GroupGate(cfg)
 end
 
 -- A tiny throttled poll re-evaluates displays so visibility conditions (combat,
--- target, casting, …) update live. Runs ONLY while some display uses visibility.
+-- target, casting, …) update live. Runs ONLY while some display needs it: a display
+-- using visibility, OR a Cooldown-Duration bar (its HIDE at cd-end has no reliable
+-- event — SPELL_UPDATE_COOLDOWN fires on cd START, not always END — so the poll
+-- re-reads the cd shadow's IsShown() ~5×/s; works whether or not the spell is placed).
 function CDM:UpdateVisibilityPoll()
   local uses = false
   local db = GA.db and GA.db.displays
@@ -290,6 +295,7 @@ function CDM:UpdateVisibilityPoll()
     for _, cfg in pairs(db) do
       if cfg.enabled ~= false then
         if HasVisibilityConstraints(cfg.visibility) then uses = true; break end
+        if cfg.kind == "bar" and cfg.bar and cfg.bar.mode == "cd_dur" then uses = true; break end
         -- A group load rule (spec/combat/target/…) also needs the live poll.
         local g = cfg.group and groups and groups[cfg.group]
         if g and HasVisibilityConstraints(g.visibility) then uses = true; break end
@@ -321,6 +327,13 @@ function CDM:EvalDisplay(id, cfg)
   --    Group + Visibility checks above (e.g. a graphic shown only out of combat).
   local sid = cfg.spellID
   if not sid then return true end
+  -- A Cooldown-Duration bar INVERTS the cooldown auto-path: it shows WHILE the spell is on its
+  -- real cooldown (the bar drains) and hides when ready. "On cooldown" is read secret-safely from
+  -- a shadow Cooldown widget's IsShown() — GetSpellCooldownDuration returns a non-nil (expired)
+  -- object when ready, and the remaining time is secret, so only the widget can tell us it's done.
+  if cfg.kind == "bar" and cfg.bar and cfg.bar.mode == "cd_dur" then
+    return self:CdBarOnCooldown(sid)
+  end
   if self.kind[sid] == "cooldown" then
     local a = self.available[sid]; if a == nil then a = true end
     return a == true
@@ -394,6 +407,17 @@ function CDM:BarDurationObject(cfg)
   return GetAuraDurationObject(unit, aiid)
 end
 
+-- The live cooldown duration object for a spell (cd_dur mode), or nil when the spell is READY.
+-- GetSpellCooldownDuration returns an object only while on the REAL cooldown (ignoreGCD=true strips
+-- the GCD → no false-show during the global cooldown), nothing/nil otherwise. AllowedWhenTainted →
+-- the OBJECT is combat-safe (same feed the charge shadow uses); checking nil-ness never reads a time.
+function CDM:CdDurationObject(spellID)
+  if not (spellID and C_Spell and C_Spell.GetSpellCooldownDuration) then return nil end
+  local d
+  pcall(function() d = C_Spell.GetSpellCooldownDuration(spellID, true) end)
+  return d
+end
+
 -- The source aura's stack count (stacks mode). May be a SECRET number in combat — we NEVER
 -- operate on it, just return it for the caller to hand to StatusBar:SetValue / FontString:SetText
 -- (both AllowedWhenTainted, so they render a secret). PLAIN out of combat. nil if unresolved.
@@ -454,11 +478,19 @@ end
 -- 0<->1 charge boundary (= exactly when availability changes), so OnShow/OnHide
 -- give us the transition with no polling. Verified on Aimed Shot 2->1->0->1->2.
 -- --------------------------------------------------------------------------
+-- A hidden Cooldown widget used purely as a secret-safe readout (IsShown()) — it must render
+-- NOTHING. Besides the swipe/edge/numbers we also kill the finish "bling": a cd bar's shadow
+-- completes naturally (no event clears it first), which fires the cooldown-finished sparkle — and
+-- on an unsized frame parented to UIParent it renders across the whole screen. 1×1 + alpha 0 make
+-- it truly invisible regardless (none of this affects IsShown, which tracks the cooldown state).
 local function mkShadowCooldown()
   local cd = CreateFrame("Cooldown", nil, UIParent, "CooldownFrameTemplate")
   if cd.SetDrawSwipe then cd:SetDrawSwipe(false) end
   if cd.SetDrawEdge then cd:SetDrawEdge(false) end
+  if cd.SetDrawBling then cd:SetDrawBling(false) end
   if cd.SetHideCountdownNumbers then cd:SetHideCountdownNumbers(true) end
+  cd:SetSize(1, 1)
+  cd:SetAlpha(0)
   return cd
 end
 
@@ -550,6 +582,48 @@ function CDM:FeedAllChargeShadows()
   for spellID in pairs(self.chargeShadow) do
     if self.isCharge[spellID] then self:FeedChargeShadow(spellID) end
   end
+end
+
+-- --------------------------------------------------------------------------
+-- Cooldown-Duration bar show/hide via a shadow Cooldown. GetSpellCooldownDuration returns a
+-- NON-NIL object even when the spell is READY (a spent object), and its remaining time is SECRET
+-- in combat — so neither a nil-check nor a compare can tell us "off cooldown." The one secret-safe
+-- read is to feed the object to a hidden Cooldown widget (it hides itself once the duration is
+-- spent — the proven charge-shadow behaviour) and read IsShown(). No OnShow/OnHide hooks (would
+-- recurse into RefreshDisplays); we feed fresh at the top of every RefreshDisplays, and the re-eval
+-- poll (UpdateVisibilityPoll turns on for cd bars) re-runs that ~5×/s so the HIDE lands promptly.
+-- --------------------------------------------------------------------------
+function CDM:EnsureCdBarShadow(spellID)
+  local cd = self.cdBarShadow[spellID]
+  if cd then return cd end
+  cd = mkShadowCooldown()
+  self.cdBarShadow[spellID] = cd
+  return cd
+end
+
+function CDM:FeedCdBarShadow(spellID)
+  local cd = self.cdBarShadow[spellID]
+  if not cd or not (C_Spell and C_Spell.GetSpellCooldownDuration) then return end
+  local ok, dur = pcall(C_Spell.GetSpellCooldownDuration, spellID, true)   -- true = GCD-stripped
+  if not ok then return end
+  if dur ~= nil and cd.SetCooldownFromDurationObject then
+    pcall(cd.SetCooldownFromDurationObject, cd, dur, true)   -- object feed is tainted-safe in combat
+  elseif cd.SetCooldown then
+    pcall(cd.SetCooldown, cd, 0, 0)                          -- no cooldown → widget hides
+  end
+end
+
+-- Is this spell on its real cooldown right now? (shadow shown ⇔ on cooldown). Self-contained:
+-- creates the shadow on first use and feeds it fresh, so EvalDisplay reflects the current state
+-- every call (driven ~5×/s by the re-eval poll → the HIDE at cd-end lands within ~0.2s).
+function CDM:CdBarOnCooldown(spellID)
+  if not spellID then return false end
+  self:EnsureCdBarShadow(spellID)
+  self:FeedCdBarShadow(spellID)
+  local cd = self.cdBarShadow[spellID]
+  local shown
+  if cd and pcall(function() shown = cd:IsShown() end) then return shown and true or false end
+  return false
 end
 
 -- Re-evaluate every display and show/hide it. Sound fires on a hidden->shown

@@ -774,10 +774,11 @@ function C:AddBar(arg)
   local tokens = {}
   for t in tostring(arg or ""):gmatch("%S+") do tokens[#tokens + 1] = t end
   local mode, sidTok, maxTok = "aura_dur", tokens[1], nil
-  if tokens[1] == "stacks" then mode, sidTok, maxTok = "stacks", tokens[2], tokens[3] end
+  if tokens[1] == "stacks" then mode, sidTok, maxTok = "stacks", tokens[2], tokens[3]
+  elseif tokens[1] == "cd" or tokens[1] == "cooldown" then mode, sidTok = "cd_dur", tokens[2] end
   local sid = tonumber(sidTok and sidTok:match("%d+"))
   if not sid then
-    GA.msg("usage: |cffffd200/ga bar <spellID>|r (duration)  •  |cffffd200/ga bar stacks <spellID> [max]|r (stack count)")
+    GA.msg("usage: |cffffd200/ga bar <spellID>|r (aura duration)  •  |cffffd200/ga bar cd <spellID>|r (cooldown)  •  |cffffd200/ga bar stacks <spellID> [max]|r (stacks)")
     return
   end
   local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(sid)) or ("Bar " .. sid)
@@ -797,6 +798,9 @@ function C:AddBar(arg)
   if mode == "stacks" then
     GA.msg(("created a STACKS Bar for |cffffd200%s|r (%d, max %d). It fills with the aura's stack count. Move it with the panel or |cffffd200/ga pos %s x y|r.")
       :format(tostring(nm), sid, barcfg.max, id))
+  elseif mode == "cd_dur" then
+    GA.msg(("created a COOLDOWN Bar for |cffffd200%s|r (%d). It shows while the spell is on cooldown and drains as it comes back up. Move it with the panel or |cffffd200/ga pos %s x y|r.")
+      :format(tostring(nm), sid, id))
   else
     GA.msg(("created a Bar for |cffffd200%s|r (%d). It shows while that aura is on you/your target and drains with its duration. Move it with the panel or |cffffd200/ga pos %s x y|r.")
       :format(tostring(nm), sid, id))

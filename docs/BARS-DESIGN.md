@@ -104,9 +104,13 @@ reconcile with his design.
    Freezing/selfAura lie (selfAura=true but debuff on target). Count number shown; **segments deferred**. Back-door
    `/ga bar stacks <spellID> [max]`. Verified on Frost Mage Freezing 1246769 (fill/empty per stack, count tracks,
    follows target).
-3. **Cooldown-Duration mode** — cd-duration feed. **QA on any cooldown.** (Show/hide inverts the cd auto-path — show
-   WHILE on cooldown; drive off "cd duration object non-nil". Scope v1 to non-charge cooldowns.)
-Plus a **type-aware editor** (Texture|Bar switch) — reconcile with Jason's Figma. Each pass ships + QAs on its own.
+3. ✅ **DONE + QA'd 2026-07-09 — Cooldown-Duration mode** (Cone of Cold 120). Shows WHILE on cooldown, drains, hides
+   when ready. Show/hide reads a **shadow Cooldown widget's IsShown()** (GetSpellCooldownDuration returns a spent
+   NON-nil object when ready + remaining is secret → a nil-check can't work), re-read by the visibility poll (no
+   reliable cd-END event). `mkShadowCooldown` gained `SetDrawBling(false)`+1×1+alpha0 (the natural-completion sparkle).
+   Back-door `/ga bar cd <spellID>`.
+**ALL THREE MODES SHIPPED.** Left: a **type-aware editor** (Texture|Bar switch) — reconcile with Jason's Figma —
+plus polish (stacks segments, duration countdown-number). Each ships + QAs on its own.
 
 ## Reference code to REUSE (so this is pick-up-and-go, not a re-investigation)
 The secret-safe reads a bar needs already exist as working code — don't re-derive them:

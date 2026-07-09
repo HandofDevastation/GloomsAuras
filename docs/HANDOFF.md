@@ -654,10 +654,18 @@ StatusBar. Three modes: **Aura Duration** (DONE), **Cooldown Duration**, **Stack
    `Build` ~56/60 — put new state/functions on the `C` table).
 2. ~~**Stacks mode**~~ ✅ DONE + QA'd (see above). Remaining polish: **segments** (N sub-bars, ArcUI "perStack")
    for a Freezing-style segmented look — deferred; smooth fill ships today.
-3. **Cooldown-Duration mode** — feed `C_Spell.GetSpellCooldownDuration(id,true)` (same object the charge shadow uses).
-   Wrinkle: show/hide must **invert** the cooldown auto-path — a cd bar shows WHILE the spell is on cooldown
-   (draining), hides when ready. Cleanest = drive show off "the cd duration object is non-nil" (object while on cd,
-   nil when ready — same behaviour the charge shadow relies on). Scope v1 to NON-charge cooldowns. Testable on any char.
+3. ~~**Cooldown-Duration mode**~~ ✅ DONE + QA'd 2026-07-09 (Frost Mage, Cone of Cold 120). A `cfg.bar.mode="cd_dur"`
+   bar shows WHILE the spell is on its real cooldown (drains via `SetTimerDuration` fed
+   `GetSpellCooldownDuration(id,true)`) and hides when ready. **Show/hide gotchas that cost 3 QA rounds — READ:**
+   (a) `GetSpellCooldownDuration` returns a **non-nil (spent) object when READY**, and remaining time is secret, so a
+   nil-check NEVER hides it. Fix: read "on cooldown" from a **shadow Cooldown widget's `IsShown()`** (`CDM.cdBarShadow`
+   / `CdBarOnCooldown` — feed the object to a hidden Cooldown; it hides itself when spent, the proven charge-shadow
+   trick). (b) That hide has **no reliable event** (SPELL_UPDATE_COOLDOWN fires on cd START, not END), so the re-eval
+   **poll** (`UpdateVisibilityPoll` now turns on for cd bars) re-reads it ~5×/s. (c) The shadow **completes naturally**
+   in the poll gap → fired the cooldown-finish **bling (screen-filling sparkle)**; `mkShadowCooldown` now
+   `SetDrawBling(false)` + 1×1 + alpha 0 (hardens the charge shadows too, no effect on IsShown). Works whether or not
+   the spell is placed in the CDM. (The "loud sound" in QA was a red herring — a leftover test aura with an Applause
+   sound, not the cd bar.) Back-door: `/ga bar cd <spellID>`.
 4. **Value-text / countdown number for DURATION bars** — stacks already shows its number; a duration COUNTDOWN
    number is still open. A hidden Cooldown widget with `SetHideCountdownNumbers(false)` fed the same durObj is the
    proposed secret-safe ticking number (BARS-DESIGN.md verify-item #3) — PROTOTYPE it; bar-only is fine.
