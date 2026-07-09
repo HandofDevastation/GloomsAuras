@@ -643,6 +643,13 @@ cooldown-granted buffs (Aspect of the Turtle), so it's not a reliable proc signa
 real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears in both columns.
 
 ### Other pending / deferred
+- **Auto-icon a new aura from its first trigger (Jason-requested backlog, 2026-07-09).** A new `+ Add Aura`
+  gets a fixed placeholder graphic (`Circle_Smooth`); `cfg.texture` nil + a `spellID` falls back to that spell's
+  icon in `Displays:ApplyConfig`. Idea: when NO texture is explicitly set, adopt the **icon of the first trigger
+  condition's spell** (WeakAuras-style) so a freshly-triggered aura looks right with zero styling. Feasible —
+  the first leaf's spellID → `C_Spell.GetSpellTexture`. Keep it as a *fallback only* (an explicit `cfg.texture`
+  always wins), and re-derive when the trigger's first condition changes. Decide: does an explicit texture pick
+  set `cfg.texture` (so the auto-icon is purely the unset default)?
 - **Override display polish (optional, offered, Jason didn't decide):** show a spell's **override** name+
   icon in the picker/list when `info.overrideSpellID ~= spellID` (e.g. "Black Arrow" not "Kill Shot"),
   storing the **base** spellID for stable matching. Cosmetic — tracking already follows overrides.
