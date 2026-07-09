@@ -378,10 +378,12 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
     can't feed a secret duration to a timer widget. Works out of combat only.
   - **Charge-spell availability**: `GetSpellCharges` AND `GetSpellCastCount` are both
     `SecretWhenCooldownsRestricted`; `IsSpellUsable` ignores cooldown AND charges (always true).
-    So directly READING "do I have a charge" is unknowable in combat. **⚠ BUT (2026-07-08) a possible
-    DOOR was found — the "shadow cooldown" technique (ArcUI): route a duration OBJECT through a hidden
-    Cooldown widget and read its `IsShown()` to DERIVE availability without reading the count. UNVERIFIED
-    for real charge spells — must be proven on Aimed Shot (Hunter) before trusting it. API-NOTES §9.3.**
+    So directly READING "do I have a charge" is unknowable in combat. **✅ BUT (2026-07-08) the DOOR is
+    CONFIRMED — the "shadow cooldown" technique: route a duration OBJECT through a hidden Cooldown widget
+    and read its `IsShown()` to DERIVE availability without reading the count. VERIFIED on Aimed Shot
+    (2→1→0→1→2): `mainShown==false` ⇔ ≥1 charge castable; the object feed does NOT throw in combat. This
+    RETIRES the wall for AVAILABILITY (gives "≥1", not exact count). Details: API-NOTES §9.3. NOT yet
+    built into the addon.**
   - Only partial charge signal: `C_SpellActivationOverlay` detects **procs** — but procs that
     grant a buff (e.g. Lock and Load) are already trackable as a **buff-active** condition, so
     that path is redundant.
@@ -520,9 +522,14 @@ one step per QA pass; never declare done before he confirms in-game.**
      but UNTESTED. NOTE the semantic: we track "is it on my CURRENT target," NOT "on any enemy" or stack count.
   3. **⏳ Instance / M+ / raid** — stricter secrecy; `IsActive`/`auraInstanceID` may go SECRET. Biggest
      unknown. Do NOT call the DoT feature "done" until tested in stricter content.
-- **THEN (separate, Hunter): charge "shadow cooldown"** for Aimed Shot (API-NOTES §9.3). UNVERIFIED — prove
-  the 4-state `IsShown()` map at 2/1/0 charges + resolve the §5 tension; first fix `GetCooldownInfo=nil` on
-  Essential/Utility cooldown items (spellID acquisition).
+- **Charge "shadow cooldown" (Aimed Shot) — ✅ BUILT + QA'd + committed (Hunter, 2026-07-08).**
+  `CDM.chargeShadow[sid]` = a hidden `Cooldown` fed the GCD-stripped `GetSpellCooldownDuration`; its
+  `OnShow → available=false` / `OnHide → available=true` fire exactly at the 0↔1-charge boundary; re-fed on
+  `SPELL_UPDATE_COOLDOWN` + `PLAYER_REGEN_ENABLED`; seeded from `IsShown()` at Discover (`FeedChargeShadow`
+  `seed=true`). Flows into the existing `cd_ready` machinery — **no new trigger types.** QA'd flawless over a
+  couple minutes incl. natural regens, **procs, and shortened cooldowns**. Isolated to the `if charge` branch,
+  so DoT / non-charge paths are structurally untouched. API-NOTES §9.3. **LIMIT: "≥1 available", not exact
+  count** (that's the next revisit — see pending; 2-charge spells CAN get exact count via the charge shadow).
 - **Optional payoff:** a real **duration countdown** on auras (`GetAuraDuration` → duration object → bar).
 - **Tooling:** `/ga probe [filter]` + `/ga capture`; captures land in `probeLog` (read off disk). Don't
   delete/rewrite the probe code until this thread closes.
@@ -553,6 +560,27 @@ Disabled ✅ shipped. Remaining:
 - Watch the two Config.lua limits (60 upvalues on `Build` = 56 now; 200 chunk locals = **187 now** after
   moving trigger state to `C._trig` — see LEARNINGS): put new drawer state/functions on the `C` table,
   controls as Build-locals.
+
+### Exact charge COUNT (Jason-requested revisit, after charge-availability build)
+The shadow build gives "≥1 available." Getting the EXACT count is PARTLY possible, secret-safely:
+- **2-charge spells (Aimed Shot):** the TWO shadows already distinguish all three states — 2=`main F,charge F`;
+  1=`main F,charge T`; 0=`main T,charge T`. So exact count (0/1/2) is DERIVABLE for free from what we build.
+- **3+ charge spells:** middle counts COLLAPSE (1 and 2 both read `main F, charge T` = "available, recharging"),
+  so exact count is NOT derivable — best is full / partial / empty buckets. (`GetSpellCharges().currentCharges`
+  and `GetSpellCastCount` are both SECRET in combat — confirmed in probe — so no direct read.)
+Revisit: expose a charge-count signal (works fully for 2-charge, degrades to buckets for 3+). Explore
+`C_Secrets` predicates only if buckets aren't enough (they return SECRET booleans → need a widget sink).
+
+### Trigger-chooser UX (Jason-requested 2026-07-08, AFTER Aimed Shot)
+The condition/aura picker (`BuildAuraList` in Config.lua) lists CDM items with confusing semantics:
+1. **Debuffs are labelled "buff."** Haunt/Agony are `selfAura=false` (debuffs ON the target) but show
+   under the "Buff" category tag. We now READ `selfAura` (see §9) — use it to label buff vs **debuff**
+   (target) in the picker + the trigger condition rows, and probably reword the states ("debuff is
+   active" for a target aura).
+2. **Many spells appear TWICE** — once as a cooldown (Essential/Utility) and once as an aura (Buff/Bar),
+   both spellID-identical. Confusing. Options to explore: merge the two into one picker entry that lets
+   you choose "track its cooldown" vs "track its aura," or clearly tag each (e.g. "Haunt (cooldown)" vs
+   "Haunt (debuff)"). Ties into the state defaulting in `TrigAddLeaf` (already uses kind → buff/cd).
 
 ### Other pending / deferred
 - **Override display polish (optional, offered, Jason didn't decide):** show a spell's **override** name+

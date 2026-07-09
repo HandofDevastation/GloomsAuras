@@ -222,12 +222,12 @@ a platform wall, not a fixable bug.
   partial signal: `C_SpellActivationOverlay.IsSpellOverlayed(spellID)` + the
   `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW/HIDE` events detect **procs** (e.g. Lock and Load) —
   non-secret, but only the proc case, not normal charge availability.
-  - **⚠ POSSIBLE DOOR (UNVERIFIED, 2026-07-08) — the "shadow cooldown" technique (§9.3).** ArcUI
-    DERIVES charge availability without reading the count: feed a duration OBJECT
-    (`GetSpellChargeDuration`/`GetSpellCooldownDuration`, GCD-stripped) into a hidden `Cooldown`
-    widget via `SetCooldownFromDurationObject`, then read its **`IsShown()`** (a plain bool). In our
-    probe this feed ran IN COMBAT without throwing — but **no real charge spell tested**, and it sits
-    in tension with §5 above. Must be proven on Aimed Shot before this wall is retired. See §9.3.
+  - **✅ DOOR CONFIRMED (2026-07-08) — the "shadow cooldown" technique (§9.3) RETIRES this wall for
+    AVAILABILITY.** Derive charge availability without reading the count: feed a duration OBJECT
+    (`GetSpellCooldownDuration`/`GetSpellChargeDuration`, GCD-stripped) into a hidden `Cooldown` widget
+    via `SetCooldownFromDurationObject` (does NOT throw in combat — object path is tainted-safe), then
+    read its **`IsShown()`** (a plain bool). VERIFIED on Aimed Shot 2→1→0→1→2: `mainShown==false` ⇔ ≥1
+    charge castable. Gives "≥1 available", not the exact count. Full table + caveats: §9.3.
 - **Compound triggers** ("buff present AND cooldown ready") work when the cooldown is a
   non-charge spell (both halves are plain bools). Charge-spell conditions can't be satisfied
   reliably → treated as unknown (won't falsely fire).
@@ -316,21 +316,32 @@ mirrors the SAME CDM we do, then reads auras directly under 122 `issecretvalue` 
    while the bar entry flips) = the "goes random" symptom. Fix: disambiguate by **cooldownID** (ArcUI
    keys on it) or (spellID + desired category), not spellID alone.
 
-### 9.3 Charge availability — the "shadow cooldown" — FOUND, UNVERIFIED
-- ArcUI never reads the charge COUNT. It feeds a **duration object** (`C_Spell.GetSpellChargeDuration(id,
-  true)` + `GetSpellCooldownDuration(id,true)`, GCD-stripped) into two hidden `Cooldown` widgets
-  (`SetDrawSwipe/Edge(false)`, `SetHideCountdownNumbers(true)`), then reads each widget's **`IsShown()`**
-  for a 4-state map: main+charge shown = 0 charges; main hidden + charge shown = 1+ available; main only =
-  non-charge on cd; both hidden = ready.
-- **Partial evidence (our probe):** the duration-object feed ran IN COMBAT without throwing and gave a
-  readable `IsShown()` for a non-charge cd (P3). Encouraging.
-- **⚠ UNVERIFIED / open questions:** (a) NO real charge spell tested — the 4-state map is unproven;
-  (b) `IsShown()` LAGS one frame after a feed (ArcUI defers 0.1s; our probe captures both immediate + +0.1s);
-  (c) it appears to CONTRADICT §5 (`SetCooldownFromDurationObject` = `AllowedWhenUntainted` ⇒ should reject
-  a secret duration from tainted code) — either the object isn't secret, or the object path differs from a
-  raw secret. **Resolve all three on the Hunter (Aimed Shot 19434) before trusting it.** If it holds it
-  RETIRES the charge WALL (§5/§7) for DISPLAY purposes (the readback is a plain bool we own → composable in
-  triggers + edge-detectable for sound).
+### 9.3 Charge availability — the "shadow cooldown" — VERIFIED (Hunter, full charge cycle 2026-07-08)
+Feed a **duration object** (`C_Spell.GetSpellCooldownDuration(id,true)` + `GetSpellChargeDuration(id,true)`,
+GCD-stripped) into two hidden `Cooldown` widgets (`SetDrawSwipe/Edge(false)`, `SetHideCountdownNumbers(true)`),
+then read each widget's **`IsShown()`** — a plain bool we own. Measured on **Aimed Shot (19434, maxCharges 2)**
+with charges driven 2→1→0→1→2 (7 `/ga probe` captures):
+
+| Aimed Shot | `mainShown` | `chargeShown` |
+|---|---|---|
+| 2 (full)       | false | false |
+| 1 (recharging) | false | true  |
+| 0 (depleted)   | true  | true  |
+
+⇒ **castable / "≥1 charge available" = `mainShown == false`** (true at 2 AND 1; false only at 0). Tracked the
+count flawlessly BOTH directions. `chargeShown` additionally separates at-max (false) from recharging (true).
+- **All three prior open questions RESOLVED:** (a) 4-state map proven on a real charge spell; (b) immediate and
+  +0.1s reads AGREED for Aimed Shot (no lag seen — but keep the deferred read as a safety net when building);
+  (c) the §5 tension resolves IN FAVOR of the technique — `SetCooldownFromDurationObject` did NOT throw in
+  combat when fed a duration OBJECT, even though `GetSpellCharges().currentCharges` was confirmed **SECRET** in
+  the same capture. So the duration-OBJECT path is tainted-safe; §5 still holds for feeding a raw secret number.
+  `IsSpellUsable` re-confirmed the TRAP (returned `true` at 0 charges).
+- **This RETIRES the charge WALL (§5/§7) for AVAILABILITY.** The readback is a plain bool we own → composable
+  in triggers + edge-detectable for sound. **LIMITATION:** gives "≥1 available", NOT the exact count (can't
+  tell 1 from 2 — both `mainShown=false`). ⏳ **NOT yet built into the addon**; stricter content (instance/M+/
+  raid) still unverified (but duration objects + our own widget's `IsShown()` should hold there — arguably more
+  robust than the DoT case). Probe now recovers cooldown-item spellID via the cooldownID registry when
+  `GetCooldownInfo` is nil (the earlier Warlock blocker).
 
 ### 9.4 The unifying principle
 Both halves are the same move: **you cannot read a secret, but you can route it through a native sink that
