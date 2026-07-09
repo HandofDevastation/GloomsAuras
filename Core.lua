@@ -391,6 +391,7 @@ local function SlashHandler(input)
     msg("commands:")
     print("  |cffffd200/ga|r                    — open the options panel")
     print("  |cffffd200/ga add <spellID>|r      — track a new buff/cooldown")
+    print("  |cffffd200/ga bar <spellID>|r      — make a duration Bar for an aura (DoT timer)")
     print("  |cffffd200/ga remove <spellID>|r   — stop tracking one")
     print("  |cffffd200/ga list|r               — list displays (with x/y/size)")
     print("  |cffffd200/ga pos <spellID> <x> <y>|r — position it (centre = 0 0)")
@@ -407,6 +408,8 @@ local function SlashHandler(input)
     print("  |cffffd200/ga probe clear|r        — wipe the saved probe log")
   elseif cmd == "add" then
     AddDisplay(rest)
+  elseif cmd == "bar" then
+    if GA.Config and GA.Config.AddBar then GA.Config:AddBar(rest) else msg("options panel not ready.") end
   elseif cmd == "remove" or cmd == "delete" then
     RemoveDisplay(rest)
   elseif cmd == "list" then

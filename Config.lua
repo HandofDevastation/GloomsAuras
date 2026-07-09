@@ -762,6 +762,32 @@ local function SetSelected(sid)
   if GA.Displays then GA.Displays:RefreshForced() end   -- preview: show the selected + eye-on, hide the rest
 end
 
+-- Back-door for building/QAing Bar displays before the type-aware editor exists (the polished
+-- bar UI is coming from Jason's Figma pass — see docs/BARS-DESIGN.md). `/ga bar <spellID>` makes
+-- a new Aura-Duration bar bound to a spell that's placed in the Cooldown Manager (Tracked Bars /
+-- Buffs). Reuses the whole display pipeline: cfg.spellID drives show/hide via the normal auto-path;
+-- kind="bar" only swaps the rendering + adds the duration feed.
+function C:AddBar(arg)
+  local db = DB()
+  if not db then GA.msg("no active profile yet — open the panel first."); return end
+  local sid = tonumber(arg and tostring(arg):match("%d+"))
+  if not sid then
+    GA.msg("usage: |cffffd200/ga bar <spellID>|r — e.g. a DoT in your Cooldown Manager Tracked Bars.")
+    return
+  end
+  local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(sid)) or ("Bar " .. sid)
+  local id = NewDisplayID()
+  db[id] = {
+    kind = "bar", spellID = sid, label = nm, enabled = true,
+    width = 220, height = 24, point = { "CENTER", 0, -120 }, alpha = 1, showLabel = true,
+    bar = { mode = "aura_dur" },
+  }
+  if GA.CDM then GA.CDM:Discover() end
+  if panel then SetSelected(id) end
+  GA.msg(("created a Bar for |cffffd200%s|r (%d). It shows while that aura is on you/your target and drains with its duration. Move it with the panel or |cffffd200/ga pos %s x y|r.")
+    :format(tostring(nm), sid, id))
+end
+
 -- --------------------------------------------------------------------------
 -- Aura picker: a scrollable list of the CDM registry (icon + name); click to
 -- add a display. Scrolls with the mouse wheel (no scrollbar thumb to drag).

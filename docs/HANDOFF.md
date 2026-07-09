@@ -486,7 +486,15 @@ PROFILE = { displays = { [id]=<AURA_CFG> }, groups = { [gid]=<GROUP> }, seq, gro
     outline="NONE"|"OUTLINE"|"THICKOUTLINE"|nil, anchor="BOTTOM"|"TOP"|"CENTER"|"LEFT"|"RIGHT"|nil,
     x=N|nil, y=N|nil, color={r,g,b}|nil },   -- on-screen label; nil ⇒ legacy showLabel+name
   glow = { type="autocast"|"pixel"|"proc"|"button"|nil(=none), customColor=bool|nil,
-    color={r,g,b}|nil } }   -- LibCustomGlow effect; active while the frame is shown
+    color={r,g,b}|nil },   -- LibCustomGlow effect; active while the frame is shown
+  kind = "texture"(default/nil) | "bar",   -- display KIND (since 2026-07-09). nil/"texture" = the icon
+                                           -- display (all existing displays); "bar" = a StatusBar.
+  bar = { mode="aura_dur"(|"cd_dur"|"stacks" later), texture=<LSM statusbar name|nil=white fill>,
+    color={r,g,b}|nil(=orange), bg={r,g,b,a}|nil, orientation="HORIZONTAL"(default)|"VERTICAL",
+    reverse=bool|nil, fill="fill"|nil(=drain), unit="player"|"target"|nil(=auto from selfAura) } }
+    -- Bar rendering + source config. The bar's SOURCE spell = cfg.spellID (NOT cfg.bar.spellID — that
+    -- design-doc field was dropped: cfg.spellID is the single source of truth, so show/hide reuses the
+    -- normal auto-path). aura_dur feeds the source aura's duration OBJECT to SetTimerDuration.
 ```
 `GA.db.groups[<groupID>] = { id, name, order, enabled (false=off), collapsed (bool),
 visibility = <same shape as an aura's visibility> or nil }` and `GA.db.groupSeq` (the "gN"
@@ -583,16 +591,54 @@ one step per QA pass; never declare done before he confirms in-game.**
 - **Phase 3 — Profiles.** ✅ **DONE + QA'd 2026-07-08** (see BUILT list): schema-2 migration + `GA.global`/
   `GA.db` split (`fc41649`), switcher UI (`6deae65`). Feature complete; nothing left open here.
 
-### ▶▶ START HERE NEXT SESSION — BUILD THE BAR DISPLAY TYPE (Duration-first)
+### ▶▶ START HERE NEXT SESSION — BAR DISPLAY TYPE (Aura-Duration slice ✅ SHIPPED + QA'd; do Stacks/CD next)
 
-**The seventh session's job: build the new "Bar" display type. Full design is written up in
-[docs/BARS-DESIGN.md](BARS-DESIGN.md) — READ IT FIRST.** Decided with Jason (2026-07-09): a Bar is a new
-display *kind* (`cfg.kind="bar"`) that reuses the whole display pipeline (list/position/trigger/visibility/
-group/sound) and only swaps the *rendering* to a StatusBar. Three modes: **Aura Duration** (build FIRST —
-Jason's DoT timers), **Cooldown Duration**, **Stacks**. All secret-safe by the same rule ("feed the widget,
-never read the raw value"): duration OBJECTS → `StatusBar:SetTimerDuration` (does NOT throw in combat, §9.3 +
-ArcUI); stack count → `SetValue` (renders even when secret). **Build order + data model + engine are all in
-the design doc.** First slice: bar rendering + Aura-Duration mode, QA'd on Warlock DoTs.
+**Bar type design: [docs/BARS-DESIGN.md](BARS-DESIGN.md).** A Bar is a display *kind* (`cfg.kind="bar"`) that
+reuses the whole pipeline (list/position/trigger/visibility/group/sound) and only swaps *rendering* to a
+StatusBar. Three modes: **Aura Duration** (DONE), **Cooldown Duration**, **Stacks**.
+
+- ✅ **QA'd 2026-07-09 (seventh session) — Bar rendering + Aura-Duration mode (slice 1a).** New `cfg.kind="bar"`
+  path: a lazily-created `StatusBar` child (`Displays:ApplyBarStyle`/`EnsureBar`; self-contained white fill tinted
+  by `SetStatusBarColor` — no Blizzard chrome — or an LSM `statusbar` texture), driven **secret-safely** by the
+  source aura's live **duration OBJECT** via `StatusBar:SetTimerDuration(durObj, interp, RemainingTime)` — the bar
+  self-animates the drain; **we never read the time.** Engine in CDM: `BarDurationObject(cfg)` resolves the aura's
+  native `frame.auraInstanceID` off its CDM item + the unit from `selfAura` (captured into `CDM.auraUnit` at
+  Discover), then `GetAuraDurationObject(unit,aiid)` (module-level, validates the instance then returns the object,
+  all pcall-guarded → a secret aiid in instances degrades to "no drain", never throws). **Show/hide is 100% reused**
+  — a bar's `cfg.spellID` drives `EvalDisplay`'s auto-path exactly like a DoT texture (the whole target-swap +
+  frameKind machinery applies for free). Feeds: on show (in `RefreshDisplays`), plus `RefeedBars()` on **UNIT_AURA**
+  (DoT refresh/extension) + **PLAYER_TARGET_CHANGED** (swap between two DoTted targets) — those two events are
+  registered only while a bar exists (`UpdateBarEvents`, gated like the visibility poll). **Catch-up fix:** the bar
+  keeps its stale fill while hidden, so the first feed after a (re)show uses `Immediate` (snap), live re-feeds use
+  `ExponentialEaseOut` (smooth refresh growth) — a `bar.__needSnap` flag set on OnHide + at style time.
+  - **VERIFY-FIRST done (against THIS client's source + ArcUI):** `SetTimerDuration` exists + is `AllowedWhenUntainted`
+    (same tag as the proven charge-shadow `SetCooldownFromDurationObject` → duration-OBJECT feed is tainted-safe);
+    `SetValue`/`SetMinMaxValues` are `AllowedWhenTainted` w/ `SecretAspect.BarValue` (secret stacks render — for the
+    Stacks slice); `StatusBarTimerDirection` = ElapsedTime(0)/RemainingTime(1). Copied ArcUI's exact aura-duration call.
+  - **DESIGN DEVIATION (intentional):** the bar's source spell is stored in **`cfg.spellID`** (the canonical
+    tracked-spell field the whole engine already uses), **NOT** a separate `cfg.bar.spellID` as the design doc drafted
+    — one source of truth, maximum reuse. `cfg.bar` holds only mode + rendering (see data model).
+  - **Testable via a back-door** (no editor UI yet — Jason's Figma redesign will inform the type-aware editor):
+    **`/ga bar <spellID>`** (`C:AddBar` in Config.lua) makes a new aura_dur bar bound to that spell. QA'd on the
+    **Warlock (Gloomwick), Agony 980**: shows on apply → smooth drain → hides on expiry; hides on target-away,
+    reappears at the right fill on target-back (**no catch-up slide**); refresh mid-duration grows it; **pandemic
+    recast extends correctly** (the durObj reflects the 130% cap on its own). **KNOWN (deferred, Jason's call):** the
+    reappear on swap-BACK still lags ~0.5s — the CDM's own target-rescan latency (same as the DoT-texture reappear-lag).
+  - **NOT committed yet? — check `git log`.** (If this note is in the tree, the slice is committed.)
+
+**▶ NEXT on bars (pick up here):**
+1. **Type-aware editor (slice 1b)** — a "Type: Texture | Bar" switch at the top of the editor that branches the
+   right pane: bar shows bar controls (mode, source spell via the existing picker → sets `cfg.spellID`, bar texture
+   via the LSM "Shared Media (bars)" category, fill colour, orientation, value-text) + the shared rows; texture shows
+   today's controls. This is the **first UI-declutter step** ([[avoid-ui-bloat]]) — RECONCILE with Jason's Figma
+   design (tokens in the style-guide artifact) before over-building. Watch Config.lua caps (chunk **184/200**;
+   `Build` ~56/60 — put new state/functions on the `C` table).
+2. **Stacks mode** — `applications` feed (PLAIN OOC / SECRET in combat; the widget renders the secret via
+   `SetValue`, confirmed by the API annotations) + segments + count text. QA on **Frost Mage Freezing (1246769)**.
+   NOTE the Freezing/selfAura-lies unit case (§-stacks) — a `cfg.bar.unit` override already exists in the resolver.
+3. **Cooldown-Duration mode** — feed `C_Spell.GetSpellCooldownDuration(id,true)` (same object the charge shadow uses).
+4. **Value-text / countdown number** — a hidden Cooldown widget with `SetHideCountdownNumbers(false)` fed the same
+   durObj is the proposed secret-safe ticking number (BARS-DESIGN.md verify-item #3) — PROTOTYPE it; bar-only is fine v1.
 
 - **Parallel track — UI reorg in Figma.** Jason is mocking up a redesigned UI in Figma (the addon is getting
   bloated; see [[avoid-ui-bloat]] memory). Design tokens were handed off as a **style-guide artifact**:
@@ -673,6 +719,16 @@ cooldown-granted buffs (Aspect of the Turtle), so it's not a reliable proc signa
 real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears in both columns.
 
 ### Other pending / deferred
+- **Sound trigger MODES (Jason-requested backlog, 2026-07-09) — its own small project, NOT now.** Today a
+  display's sound fires on every hidden→shown edge (`CDM:RefreshDisplays` → `PlaySound` on `lastShown` false→true).
+  For a **target-DoT** aura "shown" legitimately toggles on every retarget, so the sound **re-fires each time you
+  target away and back** — Jason's gripe. Wants configurable sound triggers: **(1) on initial application only**
+  (suppress the re-target refire — clean fix keys on the aura *instance* becoming NEWLY present, not just re-shown;
+  a cheap band-aid = suppress a re-show sound within ~Ns of hiding, but that also swallows a genuine fast recast),
+  **(2) on wear-off** (a "fell off" edge), **(3) in the pandemic window** (remaining < ~30% — that's time math =
+  secret in combat, but likely reachable secret-safely via a duration-object curve à la ArcUI's
+  `durObj:EvaluateRemainingPercent`; probe when we build it). Build as a proper "sound trigger" sub-feature after
+  the Bar work. Jason explicitly parked it — don't pay attention to it now.
 - **Auto-icon a new aura from its first trigger (Jason-requested backlog, 2026-07-09).** A new `+ Add Aura`
   gets a fixed placeholder graphic (`Circle_Smooth`); `cfg.texture` nil + a `spellID` falls back to that spell's
   icon in `Displays:ApplyConfig`. Idea: when NO texture is explicitly set, adopt the **icon of the first trigger

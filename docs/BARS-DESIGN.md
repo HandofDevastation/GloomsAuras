@@ -91,12 +91,17 @@ handed off in the style-guide artifact); this build targets the data model + a f
 reconcile with his design.
 
 ## Build order (Duration-first)
-1. **Bar rendering + Aura-Duration mode** — the StatusBar child, the duration-object feed, unit
-   resolution + target-swap, show/hide, basic styling (texture/colour/orientation), value-text countdown.
-   **QA on Warlock DoTs.**
+1. ✅ **DONE + QA'd 2026-07-09 — Bar rendering + Aura-Duration mode** — the StatusBar child
+   (`Displays:ApplyBarStyle`/`EnsureBar`), the duration-object feed (`CDM:BarDurationObject` →
+   `Displays:UpdateBar` → `SetTimerDuration`), unit resolution (`CDM.auraUnit` from selfAura) +
+   target-swap re-feeds (`RefeedBars` on UNIT_AURA/PLAYER_TARGET_CHANGED), show/hide (reused via
+   `cfg.spellID` auto-path), basic styling (texture/colour/orientation), catch-up snap fix. Verified
+   on Warlock Agony (drain, expiry, target-swap, refresh, pandemic). Back-door: `/ga bar <spellID>`.
+   Value-text countdown NOT built (deferred to a value-text pass — see verify-item #3). **NOTE the
+   deviation: source spell = `cfg.spellID`, not `cfg.bar.spellID`.**
 2. **Stacks mode** — `applications` feed (secret-safe), segments, count text. **QA on Frost Mage Freezing.**
 3. **Cooldown-Duration mode** — cd-duration feed. **QA on any cooldown.**
-Each pass ships + QAs on its own.
+Plus a **type-aware editor** (Texture|Bar switch) — reconcile with Jason's Figma. Each pass ships + QAs on its own.
 
 ## Reference code to REUSE (so this is pick-up-and-go, not a re-investigation)
 The secret-safe reads a bar needs already exist as working code — don't re-derive them:

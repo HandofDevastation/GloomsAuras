@@ -47,6 +47,7 @@ end
 -- pcall-guarded so a bad arg combo degrades to "no glow", never a Lua error.
 -- --------------------------------------------------------------------------
 local LCG = LibStub and LibStub("LibCustomGlow-1.0", true)
+local LSM = LibStub and LibStub("LibSharedMedia-3.0", true)   -- bar (statusbar) textures
 local GLOW_KEY = "GloomsAuras"   -- our key, so we start/stop only our own glow
 
 local function StopGlow(f)
@@ -134,7 +135,12 @@ function D:GetOrCreate(spellID)
     -- Glow follows the frame's shown state (OnShow starts it, OnHide stops it).
     f.displayID = spellID   -- the frames key, so the hooks can look up cfg
     f:SetScript("OnShow", function(self2) D:ApplyGlow(self2.displayID) end)
-    f:SetScript("OnHide", function(self2) StopGlow(self2) end)
+    f:SetScript("OnHide", function(self2)
+      StopGlow(self2)
+      -- A bar keeps its last fill while hidden; flag it so the next feed SNAPS to the correct
+      -- value (Immediate) instead of easing from the stale one — kills the target-swap catch-up.
+      if self2.bar then self2.bar.__needSnap = true end
+    end)
 
     f:Hide()
     self.frames[spellID] = f
@@ -166,6 +172,78 @@ function D:RefreshCountText(spellID)
   f.label:SetText(self:CountString(cfg))
 end
 
+-- --------------------------------------------------------------------------
+-- Bar displays (cfg.kind == "bar"): a StatusBar child instead of the icon texture.
+-- The FILL is driven by a secret-safe duration OBJECT fed via SetTimerDuration (the bar
+-- animates itself; we never read the time — see CDM:UpdateBar / BarDurationObject). Styling
+-- (texture/colour/orientation) is pure rendering. See docs/BARS-DESIGN.md.
+-- --------------------------------------------------------------------------
+local function EnsureBar(f)
+  if f.bar then return f.bar end
+  local bar = CreateFrame("StatusBar", nil, f)
+  bar:SetAllPoints(f)
+  -- A self-contained white fill (SetStatusBarColor tints it) — no Blizzard chrome. An LSM
+  -- statusbar texture can replace it per-bar (cfg.bar.texture).
+  local fill = bar:CreateTexture(nil, "ARTWORK")
+  fill:SetColorTexture(1, 1, 1, 1)
+  bar:SetStatusBarTexture(fill)
+  bar.fill = fill
+  local bg = bar:CreateTexture(nil, "BACKGROUND")
+  bg:SetAllPoints(bar)
+  bar.bg = bg
+  f.bar = bar
+  return bar
+end
+
+function D:ApplyBarStyle(f, cfg)
+  local bar = EnsureBar(f)
+  local b = cfg.bar or {}
+  -- Fill texture: an LSM statusbar name if set + resolvable, else our white fill.
+  if LSM and type(b.texture) == "string" and b.texture ~= "" and LSM.Fetch then
+    local path = LSM:Fetch("statusbar", b.texture, true)
+    bar:SetStatusBarTexture(path or bar.fill)
+  else
+    bar:SetStatusBarTexture(bar.fill)
+  end
+  bar:SetOrientation((b.orientation == "VERTICAL") and "VERTICAL" or "HORIZONTAL")
+  bar:SetReverseFill(b.reverse and true or false)
+  local oc = GA.COLOR and GA.COLOR.orange
+  local col = b.color or (oc and { oc.r, oc.g, oc.b }) or { 1, 0.47, 0.16 }
+  bar:SetStatusBarColor(col[1] or 1, col[2] or 1, col[3] or 1)
+  local bgc = b.bg or { 0, 0, 0, 0.55 }
+  bar.bg:SetColorTexture(bgc[1] or 0, bgc[2] or 0, bgc[3] or 0, bgc[4] or 0.55)
+  bar:SetMinMaxValues(0, 1)
+  bar:SetValue(1)                 -- full until a duration object is fed (CDM:UpdateBar)
+  bar.__needSnap = true           -- first real feed snaps to actual remaining (handles /reload mid-fight)
+  bar:SetAlpha(cfg.alpha or 1)
+  bar:Show()
+end
+
+-- Feed the source aura's live duration OBJECT so the bar drains itself (no polling). Resolved
+-- + validated secret-safely in CDM:BarDurationObject. No-op if the object isn't resolvable yet
+-- (e.g. a secret auraInstanceID in instances) — the bar just stays full rather than erroring.
+function D:UpdateBar(spellID)
+  local f = self.frames[spellID]; if not f or not f.bar then return end
+  local cfg = self:Config(spellID); if not cfg or cfg.kind ~= "bar" then return end
+  if not (GA.CDM and GA.CDM.BarDurationObject) then return end
+  local durObj = GA.CDM:BarDurationObject(cfg)
+  if not durObj then return end
+  if not (Enum and Enum.StatusBarInterpolation and Enum.StatusBarTimerDirection and f.bar.SetTimerDuration) then return end
+  local b = cfg.bar or {}
+  local dir = (b.fill == "fill") and Enum.StatusBarTimerDirection.ElapsedTime
+                                 or  Enum.StatusBarTimerDirection.RemainingTime
+  -- Snap (Immediate) on the first feed after a (re)show so a stale fill doesn't visibly catch up;
+  -- ease (ExponentialEaseOut) on live re-feeds (a DoT refresh grows smoothly). Either way the
+  -- StatusBar self-animates the drain from the duration object — the interp only affects jumps.
+  local snap = f.bar.__needSnap
+  f.bar.__needSnap = nil
+  local interp = snap and Enum.StatusBarInterpolation.Immediate or Enum.StatusBarInterpolation.ExponentialEaseOut
+  pcall(function()
+    f.bar:SetMinMaxValues(0, 1)
+    f.bar:SetTimerDuration(durObj, interp, dir)
+  end)
+end
+
 function D:ApplyConfig(spellID)
   local f = self.frames[spellID]
   local cfg = self:Config(spellID)
@@ -182,31 +260,42 @@ function D:ApplyConfig(spellID)
     f:SetPoint("CENTER", UIParent, "CENTER", p[2] or 0, p[3] or 0)
   end
 
-  -- Texture: a custom file path / fileID if set, else the spell's own icon.
-  local custom = cfg.texture
-  if type(custom) == "string" and custom:match("^%d+$") then custom = tonumber(custom) end  -- a typed/stored fileID
-  if custom and custom ~= "" then
-    f.tex:SetTexture(custom)
-    f.tex:SetTexCoord(0, 1, 0, 1)
+  if cfg.kind == "bar" then
+    -- Bar display: a StatusBar drives the visual; hide the icon texture + cooldown swipe.
+    f.tex:Hide()
+    if f.cd then f.cd:Hide() end
+    self:ApplyBarStyle(f, cfg)
   else
-    local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(cfg.spellID or spellID)
-    if icon then
-      f.tex:SetTexture(icon)
-      f.tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)  -- trim the default icon border
-    else
-      f.tex:SetColorTexture(0.9, 0.2, 0.6)  -- fallback: unmistakable magenta panel
-      f.tex:SetTexCoord(0, 1, 0, 1)
-    end
-  end
-  f.tex:SetAlpha(cfg.alpha or 1.0)
+    -- Icon/texture display (default). Hide any bar child a kind-switch left behind.
+    if f.bar then f.bar:Hide() end
+    f.tex:Show()
 
-  -- Recolour / blend / desaturate — pure rendering, no combat data involved.
-  f.tex:SetBlendMode((cfg.blend and cfg.blend ~= "" and cfg.blend) or "BLEND")
-  f.tex:SetDesaturated(cfg.desaturate and true or false)
-  if cfg.color then
-    f.tex:SetVertexColor(cfg.color[1] or 1, cfg.color[2] or 1, cfg.color[3] or 1)
-  else
-    f.tex:SetVertexColor(1, 1, 1)
+    -- Texture: a custom file path / fileID if set, else the spell's own icon.
+    local custom = cfg.texture
+    if type(custom) == "string" and custom:match("^%d+$") then custom = tonumber(custom) end  -- a typed/stored fileID
+    if custom and custom ~= "" then
+      f.tex:SetTexture(custom)
+      f.tex:SetTexCoord(0, 1, 0, 1)
+    else
+      local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(cfg.spellID or spellID)
+      if icon then
+        f.tex:SetTexture(icon)
+        f.tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)  -- trim the default icon border
+      else
+        f.tex:SetColorTexture(0.9, 0.2, 0.6)  -- fallback: unmistakable magenta panel
+        f.tex:SetTexCoord(0, 1, 0, 1)
+      end
+    end
+    f.tex:SetAlpha(cfg.alpha or 1.0)
+
+    -- Recolour / blend / desaturate — pure rendering, no combat data involved.
+    f.tex:SetBlendMode((cfg.blend and cfg.blend ~= "" and cfg.blend) or "BLEND")
+    f.tex:SetDesaturated(cfg.desaturate and true or false)
+    if cfg.color then
+      f.tex:SetVertexColor(cfg.color[1] or 1, cfg.color[2] or 1, cfg.color[3] or 1)
+    else
+      f.tex:SetVertexColor(1, 1, 1)
+    end
   end
 
   -- Frame strata (how the aura layers against other UI).

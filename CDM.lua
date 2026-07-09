@@ -18,6 +18,36 @@ GA.CDM = CDM
 
 local issecret = _G.issecretvalue or function() return false end
 
+-- Presence WITHOUT reading (ArcUI's HasAuraInstanceID, API-NOTES §9.1): nil/0 ⇒ absent;
+-- a SECRET id ⇒ PRESENT (can't compare it, but its existence IS the signal); plain non-zero
+-- ⇒ present. Never trips the secret-value wall.
+local function isPresent(v)
+  if v == nil then return false end
+  if issecret(v) then return true end
+  if type(v) == "number" and v == 0 then return false end
+  return true
+end
+
+-- The live duration OBJECT for an aura instance on `unit`, or nil. We NEVER read the time —
+-- we hand the object to StatusBar:SetTimerDuration (an AllowedWhenUntainted sink, exactly like
+-- the charge shadow's SetCooldownFromDurationObject, so a duration OBJECT is tainted-safe even
+-- when the underlying value is secret; API-NOTES §9.3). Validate the instance first (a stale id
+-- is the real crash risk — matches ArcUI) then return the object. All pcall-guarded: a secret
+-- auraInstanceID (possible in instances) makes GetAuraDataByAuraInstanceID throw from tainted
+-- code → we degrade to nil (bar shows, just no drain), never a Lua error.
+local function GetAuraDurationObject(unit, aiid)
+  if not (C_UnitAuras and C_UnitAuras.GetAuraDuration and C_UnitAuras.GetAuraDataByAuraInstanceID) then return nil end
+  if not unit or not UnitExists(unit) then return nil end
+  if not isPresent(aiid) then return nil end
+  local durObj
+  pcall(function()
+    if C_UnitAuras.GetAuraDataByAuraInstanceID(unit, aiid) then
+      durObj = C_UnitAuras.GetAuraDuration(unit, aiid)
+    end
+  end)
+  return durObj
+end
+
 local SOUND_ON_SHOW = (SOUNDKIT and SOUNDKIT.RAID_WARNING) or 8959
 local THROTTLE = 1.0  -- seconds; min gap between sounds per display
 
@@ -39,6 +69,8 @@ CDM.maxCharges     = {} -- spellID -> maxCharges (cached when readable OOC; pers
 CDM.chargeShadow   = {} -- spellID -> hidden shadow Cooldown widget (charge-spell availability, §9.3)
 CDM.chargeRecharge = {} -- spellID -> 2nd shadow fed the RECHARGE timer: shown while recharging, hidden AT MAX
 CDM.chargesFull    = {} -- spellID -> bool (AT MAX charges? = recharge shadow hidden); nil = unknown
+CDM.auraUnit       = {} -- spellID -> "player"|"target" (from the item's non-secret selfAura, at
+                        -- Discover). Which unit a Bar display's aura_dur source resolves on.
 
 local VIEWER_NAME_BY_CATEGORY = {
   [0] = "EssentialCooldownViewer", [1] = "UtilityCooldownViewer",
@@ -314,6 +346,67 @@ function CDM:SyncCooldowns()
 end
 
 -- --------------------------------------------------------------------------
+-- Bar displays — the duration OBJECT feed (API-NOTES §9, BARS-DESIGN.md).
+-- A Bar (cfg.kind=="bar") reuses the whole show/hide pipeline via its cfg.spellID (the
+-- auto-path in EvalDisplay drives it from the source aura's buffActive mirror — same proven
+-- path the DoT textures use). The ONLY bar-specific work is feeding the source aura's live
+-- DURATION OBJECT to the StatusBar so it drains itself, secret-safely. We resolve the aura's
+-- native auraInstanceID off its CDM item frame (§9.1) and its unit from selfAura.
+-- --------------------------------------------------------------------------
+
+-- Resolve the live duration object for a bar display's source aura, or nil.
+function CDM:BarDurationObject(cfg)
+  local sid = cfg and cfg.spellID
+  if not sid then return nil end
+  -- Unit: an explicit cfg.bar.unit override wins; else the selfAura-derived unit captured at
+  -- Discover. (The Freezing/selfAura-lies case — API-NOTES §-stacks — is a Stacks-mode concern;
+  -- for aura_dur DoTs selfAura is correct, and the override covers the exceptions.)
+  local unit = (cfg.bar and cfg.bar.unit) or self.auraUnit[sid]
+  for frame, fsid in pairs(self.frameToSpell) do
+    if fsid == sid and self.frameKind[frame] == "buff" then
+      local durObj = GetAuraDurationObject(unit, frame.auraInstanceID)
+      if durObj then return durObj end
+    end
+  end
+  return nil
+end
+
+-- Re-feed every SHOWN bar's duration object. Called on UNIT_AURA (catches DoT refresh/extension)
+-- and PLAYER_TARGET_CHANGED (catches swapping between two DoTted targets, where no active-state
+-- transition fires so RefreshDisplays wouldn't run). Cheap: only touches currently-shown bars.
+function CDM:RefeedBars()
+  if not (GA.Displays and GA.Displays.UpdateBar) then return end
+  local db = GA.db and GA.db.displays; if not db then return end
+  for id, cfg in pairs(db) do
+    if cfg.kind == "bar" and cfg.enabled ~= false and self.lastShown[id] then
+      GA.Displays:UpdateBar(id)
+    end
+  end
+end
+
+-- Register UNIT_AURA + PLAYER_TARGET_CHANGED only while at least one bar exists (they fire
+-- a lot; no reason to pay for them otherwise). Mirrors the UpdateVisibilityPoll gating idea.
+function CDM:UpdateBarEvents()
+  if not self._events then return end
+  local any = false
+  local db = GA.db and GA.db.displays
+  if db then
+    for _, cfg in pairs(db) do
+      if cfg.kind == "bar" and cfg.enabled ~= false then any = true; break end
+    end
+  end
+  if any and not self._barEvents then
+    self._barEvents = true
+    self._events:RegisterEvent("UNIT_AURA")
+    self._events:RegisterEvent("PLAYER_TARGET_CHANGED")
+  elseif not any and self._barEvents then
+    self._barEvents = false
+    self._events:UnregisterEvent("UNIT_AURA")
+    self._events:UnregisterEvent("PLAYER_TARGET_CHANGED")
+  end
+end
+
+-- --------------------------------------------------------------------------
 -- Charge-spell availability via a hidden "shadow" Cooldown  (API-NOTES §9.3).
 -- The charge COUNT is secret in combat, but "have >=1 charge" is derivable
 -- secret-safely: feed the spell's GCD-stripped cooldown DURATION OBJECT into a
@@ -444,6 +537,9 @@ function CDM:RefreshDisplays(silent)
         if not self.lastShown[sid] and not silent then self:PlaySound(sid, cfg) end
         self.lastShown[sid] = true
         GA.Displays:Show(sid)
+        if cfg.kind == "bar" and GA.Displays.UpdateBar then
+          GA.Displays:UpdateBar(sid)   -- feed the source aura's duration object → the bar drains
+        end
         if cfg.text and cfg.text.showCount and GA.Displays.RefreshCountText then
           GA.Displays:RefreshCountText(sid)   -- live charge-count update (Pass 2)
         end
@@ -530,6 +626,7 @@ function CDM:Discover()
   wipe(self.cdFrameToSpell)
   wipe(self.cdFrameToItem)
   wipe(self.isCharge)
+  wipe(self.auraUnit)
   if GA.Displays then GA.Displays:RefreshAll() end
 
   local db = GA.db and GA.db.displays
@@ -615,6 +712,12 @@ function CDM:Discover()
           if ok2 and not issecret(active) then
             self.buffActive[spellID] = active and true or false
           end
+          -- Capture the aura's unit (from non-secret selfAura config) for Bar duration feeds:
+          -- selfAura true ⇒ a buff on you, false ⇒ a debuff on your target.
+          local sa = info.selfAura
+          if sa ~= nil and not issecret(sa) then
+            self.auraUnit[spellID] = (sa == true) and "player" or "target"
+          end
         end
 
         if GA.Displays then GA.Displays:SetCooldownEnabled(spellID, false) end
@@ -651,6 +754,7 @@ function CDM:Discover()
   end
 
   self:UpdateVisibilityPoll()  -- enable the visibility poll if any display uses it
+  self:UpdateBarEvents()       -- (un)register UNIT_AURA/target events for bar duration feeds
   self:RefreshDisplays(true)   -- silent initial sync (no sound on reload)
   self:ApplyBlizzardHide()     -- re-assert the CDM-hide toggle after any re-pool
   if GA.Displays and GA.Displays.forced and GA.Displays.RefreshForced then
@@ -732,7 +836,7 @@ function CDM:Init()
     ev:RegisterEvent("COOLDOWN_VIEWER_DATA_LOADED")
     ev:RegisterEvent("COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED")
   end
-  ev:SetScript("OnEvent", function(_, event)
+  ev:SetScript("OnEvent", function(_, event, arg1)
     if event == "SPELL_UPDATE_COOLDOWN" then
       CDM:FeedAllChargeShadows()   -- re-feed charge shadows → OnShow/OnHide track availability
       CDM:RefreshDisplays()
@@ -740,6 +844,12 @@ function CDM:Init()
       CDM:SeedAvailability()
       CDM:FeedAllChargeShadows()
       CDM:RefreshDisplays()
+    elseif event == "UNIT_AURA" then
+      -- Registered only while bars exist (UpdateBarEvents). A DoT refresh/extension fires this
+      -- without an active-state transition, so re-feed shown bars to reflect the new duration.
+      if arg1 == "target" or arg1 == "player" then CDM:RefeedBars() end
+    elseif event == "PLAYER_TARGET_CHANGED" then
+      CDM:RefeedBars()             -- new target ⇒ a target-debuff bar points at a new instance
     else
       CDM:HookViewers()
       CDM:Discover()
