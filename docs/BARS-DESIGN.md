@@ -98,6 +98,30 @@ reconcile with his design.
 3. **Cooldown-Duration mode** — cd-duration feed. **QA on any cooldown.**
 Each pass ships + QAs on its own.
 
+## Reference code to REUSE (so this is pick-up-and-go, not a re-investigation)
+The secret-safe reads a bar needs already exist as working code — don't re-derive them:
+- **Per-unit aura reads (verbatim pattern):** the `/ga probe` helpers in `CDM.lua` —
+  `unitAura(unit,aiid)` (presence via `GetAuraDataByAuraInstanceID`), `auraDur(unit,aiid)` (the
+  **duration OBJECT** via `GetAuraDuration`), `auraStacks(unit,aiid)` (the `applications` count). These
+  ARE the aura_dur + stacks reads; lift them out of the probe into shared helpers.
+- **Getting a source spell's `auraInstanceID`:** the DoT-tracking code (commit **`bc6cdb0`**, API-NOTES
+  **§9.1**) — the CDM item frame carries `frame.auraInstanceID`; `CDM.frameToSpell` maps frame→spellID,
+  `CDM.frameKind` the role. Re-resolve on **`PLAYER_TARGET_CHANGED`** (the DoT work already registers it).
+- **Cooldown duration object:** `C_Spell.GetSpellCooldownDuration(spellID, true)` — already fed to Cooldown
+  widgets in `CDM:FeedChargeShadow` (the charge shadow). Same object works for a bar.
+- **Duration → StatusBar:** ArcUI `Bars/ArcUI_Display.lua` (~L3943) does
+  `bar:SetTimerDuration(durObj, Enum.StatusBarInterpolation.ExponentialEaseOut, dir)` — copy that call.
+
+## VERIFY-FIRST before building (stated as fact above, but confirm against THIS client)
+1. **`StatusBar:SetTimerDuration(durObj, interp, dir)` exists** and animates from a duration object (ArcUI
+   uses it, so it should — but confirm the method + the `Enum.StatusBarInterpolation` values on a real bar).
+2. **`SetValue`/segments render a SECRET value** in combat (ArcUI's Freezing bar does — confirm by feeding
+   the in-combat secret `applications` to a StatusBar and checking it doesn't throw and shows the fill).
+3. **Duration-countdown TEXT** — the "hidden Cooldown widget with `SetHideCountdownNumbers(false)`" trick for
+   a secret-safe ticking number is a PROPOSAL, not verified. Prototype it, or fall back to bar-only (no number)
+   for aura_dur v1.
+None of these blocks the design; they're quick confirmations so we build on solid ground, not assumptions.
+
 ## Open questions (settle as we build / from Figma)
 - Default bar texture + fill colour.
 - Value-text placement (inside the bar / above) — Figma will inform.
