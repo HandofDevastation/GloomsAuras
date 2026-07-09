@@ -86,6 +86,20 @@ local STATE_LABEL = {
   cd_ready      = "cooldown is ready",
   cd_oncd       = "cooldown is NOT ready",
 }
+-- Word a condition's state per the leaf's kind: cooldowns stay "cooldown …"; an aura's two
+-- buff states become buff (on you) / debuff (on target) / proc, from the picked entry's kind
+-- (selfAura + hasAura). Keeps the picker tags and the condition wording aligned.
+local function StateLabel(state, k)
+  if state == "cd_ready" or state == "cd_oncd" then return STATE_LABEL[state] or "?" end
+  local active = (state == "buff_active")
+  if k == "proc" then
+    return active and "proc is active" or "proc is NOT active"
+  elseif k == "debuff" then
+    return active and "debuff is active (on target)" or "debuff is NOT active (on target)"
+  else
+    return active and "buff is active (on you)" or "buff is NOT active (on you)"
+  end
+end
 
 -- --------------------------------------------------------------------------
 -- Skin toolkit (mirrors Gloom's Build Barn's UI helpers).
@@ -750,72 +764,125 @@ end
 -- add a display. Scrolls with the mouse wheel (no scrollbar thumb to drag).
 -- --------------------------------------------------------------------------
 local PICK_ROWS = 12
-local PICK_TRACK_TOP, PICK_TRACK_H = -40, PICK_ROWS * 24
-local pickerRows, pickerData, pickerOffset = {}, {}, 0
-local pickerThumb
+local PICK_ROW_H = 24
+local PICK_COL_W = 208               -- width of each of the two columns
+-- Two-panel picker state, hung on C to stay under Config.lua's chunk-local cap: a Cooldowns
+-- column + a Buffs/Debuffs column, each filtered by the shared search and scrolled on its own.
+C._pick = { cd = { rows = {}, data = {}, offset = 0 }, au = { rows = {}, data = {}, offset = 0 },
+            allCd = {}, allAu = {}, search = "" }
 
-local function BuildAuraList()
-  local list = {}
-  local E = Enum and Enum.CooldownViewerCategory
-  if not (E and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCategorySet) then return list end
-  local cats = { { "Essential", E.Essential }, { "Utility", E.Utility }, { "Buff", E.TrackedBuff }, { "Bar", E.TrackedBar } }
-  for _, c in ipairs(cats) do
-    local ids = C_CooldownViewer.GetCooldownViewerCategorySet(c[2])
-    if type(ids) == "table" then
-      for _, id in ipairs(ids) do
-        local info = C_CooldownViewer.GetCooldownViewerCooldownInfo(id)
+-- Build the two source lists from the CDM: Essential/Utility → Cooldowns column;
+-- TrackedBuff/TrackedBar → Buffs/Debuffs column (tagged Buff vs Debuff via `selfAura`:
+-- true = on you, false/nil = on your target). Each item carries its default trigger `state`
+-- + semantic `k`, so the column you pick from sets the right condition (and wording).
+-- Build the two lists from the LIVE Cooldown Manager item frames — the exact set GloomsAuras
+-- can actually hook (a spell left in the CDM's "Not Displayed" bucket has no frame, so it won't
+-- appear here and can't be tracked; the picker never lists a spell that wouldn't work). Rebuilt
+-- on every open, so it always reflects the current CDM + spec. Essential/Utility → Cooldowns
+-- column; TrackedBuff/TrackedBar → Buffs/Debuffs (tagged Buff/Debuff via selfAura, Proc when
+-- hasAura=false, e.g. Deathblow/Nightfall).
+local function BuildAuraLists()
+  wipe(C._pick.allCd); wipe(C._pick.allAu)
+  local viewers = {
+    { EssentialCooldownViewer, "cd" }, { UtilityCooldownViewer, "cd" },
+    { BuffIconCooldownViewer,  "au" }, { BuffBarCooldownViewer,  "au" },
+  }
+  local seen = {}
+  for _, v in ipairs(viewers) do
+    local viewer, bucket = v[1], v[2]
+    local pool = viewer and viewer.itemFramePool
+    if pool and pool.EnumerateActive then
+      for frame in pool:EnumerateActive() do
+        local info
+        pcall(function() info = frame.GetCooldownInfo and frame:GetCooldownInfo() end)
+        -- Cooldown items can return nil GetCooldownInfo out of combat; recover via the registry.
+        if not info and frame.GetCooldownID and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
+          pcall(function()
+            local cid = frame:GetCooldownID()
+            if cid ~= nil and not issecret(cid) then info = C_CooldownViewer.GetCooldownViewerCooldownInfo(cid) end
+          end)
+        end
         local sid = info and info.spellID
         if sid and not issecret(sid) then
-          local name = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(sid)) or ("Spell " .. sid)
-          local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(sid)
-          list[#list + 1] = { spellID = sid, name = name, icon = icon, cat = c[1] }
+          local k, tag = "cooldown", nil
+          if bucket == "au" then
+            -- selfAura is the reliable axis: true = on you (buff), false/nil = on target (debuff).
+            -- (hasAura is NOT a reliable proc signal — it also flags cooldown-granted buffs like
+            -- Aspect of the Turtle — so we don't tag procs separately.)
+            local sa = info.selfAura
+            local isBuff = (sa ~= nil and not issecret(sa) and sa == true)
+            k   = isBuff and "buff" or "debuff"
+            tag = isBuff and "Buff" or "Debuff"
+          end
+          local key = bucket .. ":" .. sid .. ":" .. k
+          if not seen[key] then
+            seen[key] = true
+            local name = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(sid)) or ("Spell " .. sid)
+            local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(sid)
+            local item = { spellID = sid, name = name, icon = icon,
+              state = (bucket == "cd") and "cd_ready" or "buff_active", k = k, tag = tag }
+            if bucket == "cd" then C._pick.allCd[#C._pick.allCd + 1] = item
+            else C._pick.allAu[#C._pick.allAu + 1] = item end
+          end
         end
       end
     end
   end
-  return list
 end
 
 local function RefreshPicker()
-  local n = #pickerData
-  local maxOff = math.max(0, n - PICK_ROWS)
-  if pickerOffset > maxOff then pickerOffset = maxOff end
-  if pickerOffset < 0 then pickerOffset = 0 end
-  for i = 1, PICK_ROWS do
-    local row, item = pickerRows[i], pickerData[i + pickerOffset]
-    if item then
-      row.spellID = item.spellID
-      row.icon:SetTexture(item.icon or 134400)
-      local have = DB() and DB()[item.spellID]
-      row.text:SetText(("%s  |cff888888(%s)|r%s"):format(item.name, item.cat, have and "  |cff55ff55✓|r" or ""))
-      row:Show()
-    else
-      row:Hide()
+  local q = (C._pick.search or ""):lower()
+  local trackH = PICK_ROWS * PICK_ROW_H
+  for _, key in ipairs({ "cd", "au" }) do
+    local p = C._pick[key]
+    wipe(p.data)
+    for _, it in ipairs((key == "cd") and C._pick.allCd or C._pick.allAu) do
+      if q == "" or (it.name and it.name:lower():find(q, 1, true)) then p.data[#p.data + 1] = it end
     end
-  end
-  if pickerThumb then
-    if n <= PICK_ROWS then
-      pickerThumb:Hide()
-    else
-      pickerThumb:Show()
-      local thumbH = math.max(24, PICK_TRACK_H * (PICK_ROWS / n))
-      pickerThumb:SetHeight(thumbH)
-      local y = PICK_TRACK_TOP - (PICK_TRACK_H - thumbH) * (pickerOffset / maxOff)
-      pickerThumb:ClearAllPoints()
-      pickerThumb:SetPoint("TOPRIGHT", pickerFrame, "TOPRIGHT", -6, y)
+    local n = #p.data
+    local maxOff = math.max(0, n - PICK_ROWS)
+    if p.offset > maxOff then p.offset = maxOff end
+    if p.offset < 0 then p.offset = 0 end
+    for i = 1, PICK_ROWS do
+      local row, item = p.rows[i], p.data[i + p.offset]
+      if row then
+        if item then
+          row.item = item
+          row.icon:SetTexture(item.icon or 134400)
+          row.text:SetText(item.tag and ("%s  |cff888888(%s)|r"):format(item.name, item.tag) or item.name)
+          row:Show()
+        else
+          row.item = nil; row:Hide()
+        end
+      end
+    end
+    if p.thumb and p.track then
+      if n <= PICK_ROWS then
+        p.thumb:Hide()
+      else
+        p.thumb:Show()
+        local thumbH = math.max(24, trackH * (PICK_ROWS / n))
+        p.thumb:SetHeight(thumbH)
+        p.thumb:ClearAllPoints()
+        p.thumb:SetPoint("TOP", p.track, "TOP", 0, -(trackH - thumbH) * (p.offset / maxOff))
+      end
     end
   end
 end
 
 local function BuildPicker()
-  local W, H = 370, PICK_ROWS * 24 + 64
+  local GAP = 14
+  local colX = { cd = GAP, au = GAP + PICK_COL_W + GAP }
+  local ROWS_TOP = -104
+  local W = GAP + PICK_COL_W + GAP + PICK_COL_W + GAP
+  local H = -ROWS_TOP + PICK_ROWS * PICK_ROW_H + 28
   local f = CreateFrame("Frame", "GloomsAurasPicker", UIParent)
   f:SetSize(W, H); f:SetPoint("CENTER"); f:SetFrameStrata("FULLSCREEN_DIALOG")
-  f:EnableMouse(true); f:EnableMouseWheel(true)
+  f:EnableMouse(true)
   skinPlate(f)
 
   local title = newText(f, FONT.title, 18, COLOR.purple, "CENTER")
-  title:SetPoint("TOP", 0, -12); title:SetText("Choose an aura to track")
+  title:SetPoint("TOP", 0, -12); title:SetText("Choose a spell to track")
   local close = flatButton(f, 22, 20, COLOR.heroic, "X", 12)
   close:SetPoint("TOPRIGHT", -8, -8); close:SetScript("OnClick", function() f:Hide() end)
 
@@ -827,42 +894,56 @@ local function BuildPicker()
   ptb:SetScript("OnDragStart", function() if f:IsMovable() then f:StartMoving() end end)
   ptb:SetScript("OnDragStop", function() f:StopMovingOrSizing() end)
 
-  for i = 1, PICK_ROWS do
-    local row = CreateFrame("Button", nil, f)
-    row:SetSize(348, 22); row:SetPoint("TOPLEFT", 10, -40 - (i - 1) * 24)
-    local hl = row:CreateTexture(nil, "HIGHLIGHT"); hl:SetAllPoints(); hl:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.20)
-    local icon = row:CreateTexture(nil, "ARTWORK"); icon:SetSize(20, 20); icon:SetPoint("LEFT", 2, 0); row.icon = icon
-    local text = newText(row, FONT.body, 12, TEXT, "LEFT"); text:SetPoint("LEFT", 28, 0); text:SetPoint("RIGHT", -4, 0); row.text = text
-    row:SetScript("OnClick", function(self)
-      if not self.spellID then return end
-      if pickerOnPick then                 -- picking for a trigger condition
-        local cb = pickerOnPick; pickerOnPick = nil
-        f:Hide()
-        cb(self.spellID)
-        return
-      end
-      if DB() and not DB()[self.spellID] then
-        local name = C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(self.spellID)
-        DB()[self.spellID] = { spellID = self.spellID, label = name or ("Spell " .. self.spellID),
-          enabled = true, width = 64, height = 64, point = { "CENTER", 0, 120 }, alpha = 1, showLabel = true }
-      end
-      if GA.CDM then GA.CDM:Discover() end
-      RefreshPicker()      -- show the ✓
-      SetSelected(self.spellID)
-    end)
-    pickerRows[i] = row
+  -- Search box (filters BOTH columns by name).
+  local sb = flatEditBox(f, W - 2 * GAP, 22); sb:SetPoint("TOPLEFT", GAP, -46)
+  sb:SetScript("OnTextChanged", function(self) C._pick.search = self:GetText() or ""; RefreshPicker() end)
+  sb:SetScript("OnEscapePressed", function(self) self:SetText(""); self:ClearFocus() end)
+  local sl = newText(f, FONT.body, 11, MUTE, "LEFT"); sl:SetPoint("BOTTOMLEFT", sb, "TOPLEFT", 2, 3); sl:SetText("Search")
+
+  -- Two columns: Cooldowns (cd) + Buffs & Debuffs (au). Each is a mouse-wheel container
+  -- whose child rows propagate the wheel up to it, so each column scrolls independently.
+  local headers = { cd = "Cooldowns", au = "Buffs & Debuffs" }
+  for _, key in ipairs({ "cd", "au" }) do
+    local p, x = C._pick[key], colX[key]
+    local hdr = newText(f, FONT.title, 13, COLOR.purple, "LEFT")
+    hdr:SetPoint("TOPLEFT", x, -84); hdr:SetText(headers[key])
+
+    local col = CreateFrame("Frame", nil, f)
+    col:SetPoint("TOPLEFT", x, ROWS_TOP); col:SetSize(PICK_COL_W, PICK_ROWS * PICK_ROW_H)
+    col:EnableMouseWheel(true)
+    col:SetScript("OnMouseWheel", function(_, delta) p.offset = p.offset - delta; RefreshPicker() end)
+
+    local track = col:CreateTexture(nil, "ARTWORK"); track:SetColorTexture(1, 1, 1, 0.08)
+    track:SetPoint("TOPRIGHT", 0, 0); track:SetSize(6, PICK_ROWS * PICK_ROW_H); p.track = track
+    p.thumb = col:CreateTexture(nil, "OVERLAY"); p.thumb:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 1)
+    p.thumb:SetWidth(6); p.thumb:SetPoint("TOP", track, "TOP")
+
+    for i = 1, PICK_ROWS do
+      local row = CreateFrame("Button", nil, col)
+      row:SetSize(PICK_COL_W - 12, 22); row:SetPoint("TOPLEFT", 0, -(i - 1) * PICK_ROW_H)
+      local hl = row:CreateTexture(nil, "HIGHLIGHT"); hl:SetAllPoints(); hl:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.20)
+      local icon = row:CreateTexture(nil, "ARTWORK"); icon:SetSize(18, 18); icon:SetPoint("LEFT", 2, 0); row.icon = icon
+      local text = newText(row, FONT.body, 12, TEXT, "LEFT"); text:SetPoint("LEFT", 24, 0); text:SetPoint("RIGHT", -4, 0); row.text = text
+      row:SetScript("OnClick", function(self)
+        local item = self.item; if not item then return end
+        if pickerOnPick then                 -- picking for a trigger condition
+          local cb = pickerOnPick; pickerOnPick = nil
+          f:Hide(); cb(item)
+        end
+      end)
+      p.rows[i] = row
+    end
   end
 
-  -- Visual scrollbar (position indicator; the mouse wheel does the scrolling).
-  local track = f:CreateTexture(nil, "ARTWORK"); track:SetColorTexture(1, 1, 1, 0.08)
-  track:SetPoint("TOPRIGHT", -6, PICK_TRACK_TOP); track:SetSize(6, PICK_TRACK_H)
-  pickerThumb = f:CreateTexture(nil, "OVERLAY"); pickerThumb:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 1); pickerThumb:SetWidth(6)
-
   local footer = newText(f, FONT.body, 11, MUTE, "CENTER")
-  footer:SetPoint("BOTTOM", 0, 8); footer:SetText("mouse-wheel to scroll")
+  footer:SetPoint("BOTTOM", 0, 8); footer:SetText("mouse-wheel a column to scroll")
 
-  f:SetScript("OnMouseWheel", function(_, delta) pickerOffset = pickerOffset - delta; RefreshPicker() end)
-  f:SetScript("OnShow", function() pickerData = BuildAuraList(); pickerOffset = 0; RefreshPicker() end)
+  f:SetScript("OnShow", function()
+    BuildAuraLists()
+    C._pick.search = ""; if sb then sb:SetText("") end
+    C._pick.cd.offset = 0; C._pick.au.offset = 0
+    RefreshPicker()
+  end)
   tinsert(UISpecialFrames, "GloomsAurasPicker")
   f:Hide()  -- created hidden so the first OpenPicker transitions + fires OnShow
   pickerFrame = f; RegisterSubWindow(f)
@@ -1320,13 +1401,20 @@ function C:TrigRebind()   -- watch set changed → rebind spells, then re-render
   self:TrigRender()
 end
 
-function C:TrigAddLeaf(spellID, ti)
+function C:TrigAddLeaf(item, ti)
   local t = self:TrigTree(); if not t then return end
+  if type(item) == "number" then item = { spellID = item } end   -- back-compat / safety
+  local spellID = item.spellID; if not spellID then return end
   local list = (ti and t.conditions[ti] and t.conditions[ti].conditions) or t.conditions
-  local kind = GA.CDM and GA.CDM.kind and GA.CDM.kind[spellID]
-  local state = (kind == "cooldown") and "cd_ready" or "buff_active"
-  local name = C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(spellID)
-  table.insert(list, { spellID = spellID, state = state, name = name })
+  local state = item.state
+  if not state then                                              -- fell through without a picked column
+    local kind = GA.CDM and GA.CDM.kind and GA.CDM.kind[spellID]
+    state = (kind == "cooldown") and "cd_ready" or "buff_active"
+  end
+  local name = item.name or (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(spellID))
+  local leaf = { spellID = spellID, state = state, name = name }
+  if item.k then leaf.k = item.k end                             -- buff/debuff/proc → wording
+  table.insert(list, leaf)
   self:TrigRebind()
 end
 function C:TrigAddGroup()
@@ -1346,8 +1434,12 @@ function C:TrigRemove(ti, ci)
 end
 function C:TrigCycleState(ti, ci)
   local leaf = self:TrigNode(ti, ci); if not leaf or not leaf.state then return end
-  local idx = 1; for j, s in ipairs(STATE_ORDER) do if s == leaf.state then idx = j break end end
-  leaf.state = STATE_ORDER[(idx % #STATE_ORDER) + 1]
+  -- Toggle within the leaf's own family: an aura condition flips active<->inactive, a cooldown
+  -- condition flips ready<->on-cd — instead of rotating through all four (which let a debuff
+  -- become a nonsensical "cooldown ready"). Kind is inferred from the current state.
+  local isCd = (leaf.state == "cd_ready" or leaf.state == "cd_oncd")
+  local a, b = (isCd and "cd_ready" or "buff_active"), (isCd and "cd_oncd" or "buff_inactive")
+  leaf.state = (leaf.state == a) and b or a
   if GA.CDM then GA.CDM:RefreshDisplays() end
   self:TrigRender()
 end
@@ -1389,7 +1481,7 @@ function C:RenderTrigRow(row, e)
     row.name:ClearAllPoints(); row.name:SetPoint("LEFT", indented and 46 or 28, 0); row.name:SetWidth(indented and 96 or 114)
     row.name:SetText((leaf and (leaf.name or (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(leaf.spellID)))) or tostring(leaf and leaf.spellID or "?"))
     row.name:SetTextColor(TEXT.r, TEXT.g, TEXT.b); row.name:Show()
-    row.mid:SetText(STATE_LABEL[leaf and leaf.state] or "?"); row.mid:Show()
+    row.mid:SetText(StateLabel(leaf and leaf.state, leaf and leaf.k)); row.mid:Show()
     row.rem:Show(); row.add:Hide()
   elseif e.kind == "ghead" then
     local grp = self:TrigNode(e.ti)
@@ -1463,14 +1555,14 @@ function C:BuildTriggerEditor()
     add:SetFontString(row.addText)
     add:SetScript("OnEnter", function() row.addText:SetTextColor(1, 1, 1) end)
     add:SetScript("OnLeave", function() row.addText:SetTextColor(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b) end)
-    add:SetScript("OnClick", function() local ti = row.ti; OpenPicker(function(sid) C:TrigAddLeaf(sid, ti) end) end)
+    add:SetScript("OnClick", function() local ti = row.ti; OpenPicker(function(item) C:TrigAddLeaf(item, ti) end) end)
     row:Hide()
     C._trig.rows[i] = row
   end
 
   local addC = flatButton(f, 140, 24, COLOR.purple, "+ Add Condition", 12)
   addC:SetPoint("BOTTOMLEFT", 16, 44)
-  addC:SetScript("OnClick", function() OpenPicker(function(sid) C:TrigAddLeaf(sid, nil) end) end)
+  addC:SetScript("OnClick", function() OpenPicker(function(item) C:TrigAddLeaf(item, nil) end) end)
   local addG = flatButton(f, 120, 24, COLOR.heroic, "+ Add Group", 12)
   addG:SetPoint("LEFT", addC, "RIGHT", 8, 0)
   addG:SetScript("OnClick", function() C:TrigAddGroup() end)
