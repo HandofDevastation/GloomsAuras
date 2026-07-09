@@ -1012,6 +1012,23 @@ function CDM:Probe(filter)
     if d == nil then return "nil" end
     return "obj:"..type(d)
   end
+  -- STACK COUNT probe (the Freezing/Shatter question): read the aura's `applications` and report
+  -- whether it's a PLAIN number (=> comparable => "stacks >= X" triggers possible) or SECRET (=>
+  -- display-only, like feeding a bar/text a secret value). This is the whole feasibility question.
+  local function auraStacks(unit, aiid)
+    if not (C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID) then return "noAPI" end
+    if not UnitExists(unit) then return "no-"..unit end
+    if not present(aiid) then return "noID" end
+    local ok, data = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, aiid)
+    if not ok then return "THREW" end
+    if data == nil then return "absent" end
+    if issecret(data) then return "secretData" end
+    local ap
+    pcall(function() if type(data) == "table" then ap = data.applications end end)
+    if ap == nil then return "nil" end
+    if issecret(ap) then return "SECRET(number)" end
+    return "PLAIN="..tostring(ap)
+  end
 
   local inCombat = InCombatLockdown() and true or false
   local tName = UnitExists("target") and (UnitName("target") or "?") or "<none>"
@@ -1104,6 +1121,7 @@ function CDM:Probe(filter)
           shown, active, pval(aiid), tostring(present(aiid)), expUnit))
         emit(("     aura: player[%s] target[%s] | dur player[%s] target[%s]"):format(
           unitAura("player", aiid), unitAura("target", aiid), auraDur("player", aiid), auraDur("target", aiid)))
+        emit(("     stacks: player[%s] target[%s]"):format(auraStacks("player", aiid), auraStacks("target", aiid)))
         emit(("     cd: isOnActualCooldown=%s cooldownIsActive=%s isOnGCD=%s startTime=%s"):format(
           pval(frame.isOnActualCooldown), pval(frame.cooldownIsActive),
           pval(frame.isOnGCD), pval(frame.cooldownStartTime)))
