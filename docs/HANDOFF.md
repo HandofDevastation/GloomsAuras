@@ -402,10 +402,23 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   section — Essential / Utility / Tracked Buffs / Tracked Bars — to be tracked. "Not Displayed" items get
   moved to a separate **Hidden** category (`HiddenSpell`/`HiddenAura`, via a `HideByDefault` flag + saved
   layout — `CooldownViewerSettingsDataProvider.lua`), so they have **no item frame** and GloomsAuras can't
-  hook them. The **trigger picker now sources from the live item frames**, so it only lists trackable spells
-  (never a "Not Displayed" one). `/ga debug` = "verify tracking" (FOUND/NOT FOUND per display); `/ga charges`
+  hook them. `/ga debug` = "verify tracking" (FOUND/NOT FOUND per display); `/ga charges`
   reports charge status. (Bonus source find: `CooldownViewerMixin:RefreshActiveFramesForTargetChange` — the
   CDM DOES re-scan on target change; relevant to the DoT reappear-lag known issue.)
+- **Trigger picker MUST source from the data provider — NOT live frames, NOT the raw category set (VERIFIED
+  2026-07-08, sixth session; three approaches tried, do NOT relitigate).** The trigger picker (`BuildAuraLists`
+  in Config.lua) lists trackable spells; the ONLY correct source is
+  `CooldownViewerSettings:GetDataProvider():GetOrderedCooldownIDsForCategory(cat, false)` +
+  `:GetCooldownInfoForID(id)` — the exact ordered set each viewer lays out (CooldownViewer.lua RefreshLayout).
+  Why the other two FAIL: **(a) live item frames** — a frame clears its cooldownID the instant it's
+  released/hidden (Blizzard's itemFramePool reset callback → `ClearCooldownID` → `cooldownInfo=nil`), and the
+  Essential viewer HIDES items while inactive (`hideWhenInactive`), so out of combat every READY Essential
+  cooldown (Rapid Fire, Aimed Shot…) reports no spellID and silently vanished from the picker. **(b) raw
+  `GetCooldownViewerCategorySet(cat, …)`** — returns raw PRE-remap IDs + flags: it under-returns Tracked Buffs
+  AND, paired with a manual HideByDefault filter, DROPS known buffs the user actually displays (Lock and Load,
+  Trueshot, Aspects — HideByDefault-by-default but placed into a tracked category). The data-provider list is
+  frame-independent, respects the saved layout + HideByDefault remap + `isKnown`, so it lists exactly what's
+  displayed. Fallback to the raw set (with our own isKnown + HideByDefault filter) only if the provider is nil.
 
 ## Diagnostics / commands
 - `/ga` — open the options panel. `/ga help` — list commands.
@@ -535,9 +548,17 @@ one step per QA pass; never declare done before he confirms in-game.**
      buff, "Precise Shots active AND Kill Shot cd_ready" combo).
   2. **Multi-target DoT — ✅ PASSED (2026-07-08).** Agony on 2 dummies, swapping between them: stays shown on
      both, hides on a clean target. Semantic confirmed: tracks "on my CURRENT target," NOT any-enemy/count.
-  3. **⏳ Instance / M+ / raid — UNVERIFIED (do next session).** Stricter secrecy; `IsActive`/`auraInstanceID`
-     may go SECRET. **Biggest correctness unknown** — do NOT call DoT/charge tracking "done" until tested in an
-     instance. (Both degrade gracefully — a secret read leaves the display as-is, no error — but unproven.)
+  3. **Instance check — ✅ GOOD ENOUGH (2026-07-08, sixth session; follower dungeon, Gloomwick).** Ran 7 `/ga
+     probe` captures dotting two targets in a follower dungeon; all four DoTs (Haunt/Agony/UA/Corruption) read
+     **present on target** with plain-int auraInstanceIDs + duration objects, and followed the target across
+     captures. **KEY (verify-before-claiming):** under the hood the follower dungeon was **identical to open-world
+     combat** — cooldown fields came back `SECRET(boolean)` (normal in ANY combat), but **auraInstanceID stayed a
+     plain readable int, never secret**. So it did NOT exercise the feared "auras go secret in group content" path;
+     it's the same difficulty as the open-world test. The truly-stricter tier (real M+/raid) was NOT tested — Jason
+     called it: he judges the secret-value rules don't vary by content tier (a global anti-automation gate, not
+     difficulty-gated), and the captures show no content-based aura secrecy. Banked as sufficient; the
+     `secret⇒present` fallback remains reasoned-but-unexercised. Bonus: the charge **shadow** readback returned a
+     clean value even while raw cooldown fields were secret — confirms that mechanism survives combat secrecy.
   4. **⏳ Deathblow / proc (`hasAura=false`) tracking — UNVERIFIED (do next session, quick).** We fixed proc
      LABELING (dropped the unreliable `hasAura` tag), but never confirmed a proc buff actually LIGHTS UP. Test:
      make a "Deathblow — buff is active" aura on the Hunter, fish the proc on a dummy. If it doesn't fire, the
@@ -566,15 +587,19 @@ availability, and the two-panel trigger picker — all committed + pushed (see A
 note).** Highest-priority OPEN items:
 
 **A. Finish verifying the CDM-tracking work (ACTIVE THREAD above has full detail):**
-- **Instance / M+ / raid check** — the one real correctness unknown for DoT + charge tracking (stricter
-  secrecy; both degrade gracefully but are unproven there).
+- ~~**Instance / M+ / raid check**~~ ✅ **BANKED (2026-07-08, sixth session)** — follower dungeon passed; behaved
+  identically to open-world combat (auras readable, cooldowns secret-in-combat as always). Jason's call: rules
+  don't vary by content tier, so sufficient. See QA STATUS #3.
 - **Deathblow / proc (`hasAura=false`) tracking** — quick Hunter test: does a proc buff actually light up?
 - **Exact charge COUNT** — revisit (2-charge spells can derive it from the charge shadow; backlog item below).
 
 **B. Then resume the EFFECTS/appearance push** (Glow ✅ + grouped triggers ✅ + eye-preview/Disabled ✅ shipped):
-0. **⚠ QA a GROUPED trigger IN COMBAT first.** The AND/OR/NONE engine is committed and the editor + flat
-   triggers are verified, but a trigger containing an actual GROUP was never driven end-to-end in combat
-   (build `(X OR Y) AND Z` on a dummy, confirm it gates correctly; also test a **NONE** group = NOT).
+0. ~~**⚠ QA a GROUPED trigger IN COMBAT first.**~~ ✅ **DONE + QA'd (2026-07-08, sixth session; Hunter/dummy).**
+   Built `(Rapid Fire ready OR Aimed Shot ready) AND Precise Shots active` and drove it through all states in
+   combat — the nested OR group holds while one leaf is true, the whole group correctly goes false only when
+   BOTH leaves are false, and it ANDs with the top-level Precise Shots leaf. Grouped triggers work end-to-end.
+   (NONE-group test was set up as a quick follow-on but not run — low risk; the recursion + NONE path is the
+   same code the AND/OR path exercised.)
 1. **Motion** — animate auras via native WoW **AnimationGroups** (pure rendering, no lib, no secret data):
    presets Pulse (scale) / Spin (rotation) / Bounce/Drift (translate) / Fade (alpha) / Orbit, each with
    speed + amount, plus a one-shot "pop/flash on show". Build as a **"Motion…"** button on the existing
@@ -624,21 +649,37 @@ real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears
 - **Export/import** strings for sharing (later; naturally follows Profiles).
 
 ## Current in-game context
-- **Jason's MAIN this season is Affliction Warlock** (added 2026-07-08) — char **"Gloomvale - Stormrage"**,
-  account `AELWYN`. His CDM **Tracked Bars** hold Haunt (48181), Corruption (146739), Agony (980), Unstable
+- **Jason's MAIN this season is Affliction Warlock** (added 2026-07-08) — char **"Gloomwick - Stormrage"**
+  (CORRECTED 2026-07-08 sixth session — the handoff previously said "Gloomvale"; that's actually his HUNTER.
+  Confirmed from SavedVariables: the **Gloomwick** profile holds the Warlock DoT auras, the **Gloomvale** profile
+  holds the Hunter auras), account `AELWYN`. His CDM **Tracked Bars** hold Haunt (48181), Corruption (146739), Agony (980), Unstable
   Affliction (1259790), Seed of Corruption (27243) + the Curses; **Tracked Buffs** incl. Nightfall (264571);
   Burning Rush (111400, a self-buff that sits in BuffBar → `selfAura=true`). He also runs **ArcUI**, which
   tracks these DoTs correctly — the reference implementation for the §9 approach. The Hunter below is still
   relevant for the charge (Aimed Shot) work. **QA discipline reminder: he wants to be thorough; frame every
   build as a hypothesis to verify in-game, never as done.**
-- Jason plays **Marksmanship Hunter** (**Dark Ranger** hero talents). Relevant IDs: Trick Shots buff
+- Jason plays **Marksmanship Hunter** (**Dark Ranger** hero talents) on char **"Gloomvale - Stormrage"** (its
+  profile holds the Hunter auras). Relevant IDs: Trick Shots buff
   **257621**, Rapid Fire **257044** (non-charge cd, works), Aimed Shot **19434** (2 charges — availability
   walled), Precise Shots **260240** (buff), **Kill Shot 53351 → override Black Arrow 466930** (Black Arrow
   replaces Kill Shot; a **1-charge** cd — see the charge learning above; his working aura = "Precise Shots
   active AND Kill Shot cd_ready"). His SavedVariables has displays incl. Trick Shots, Rapid Fire, Kill Shot,
   Aimed Shot, plus experiments. He now also has an **"MM Hunter"** group (load rule = spec).
-- His active character/profile is **"Gloomvale - Stormrage"** (account folder `AELWYN`). After Phase-3 QA
-  he may have leftover test profiles (e.g. "Copy Test") — harmless; deletable from the Profiles drawer.
+- His Warlock (main) character/profile is **"Gloomwick - Stormrage"**; his Hunter is **"Gloomvale - Stormrage"**
+  (account folder `AELWYN`; both profiles exist and are correctly populated). After Phase-3 QA he may have
+  leftover test profiles (e.g. "Copy Test") — harmless; deletable from the Profiles drawer.
+- **Session end 2026-07-09 (sixth session) — verification + a picker regression fix.** (1) **Instance check
+  banked** — follower dungeon on Gloomwick (Warlock); DoT tracking works, but the follower dungeon behaved
+  identically to open-world combat (auras readable, cooldowns secret-in-combat as always), so it did NOT
+  exercise the feared "auras go secret in group content" path; Jason called it sufficient (rules don't vary by
+  content tier). (2) **Grouped triggers verified in combat** — `(RF ready OR Aimed ready) AND Precise active`
+  on the Hunter, all states correct → closes the ⚠ item. (3) **Fixed a trigger-picker regression** (Config.lua
+  `BuildAuraLists`): the fifth session's "source from live frames" approach silently dropped ready-OOC Essential
+  cooldowns (Rapid Fire) because hidden frames clear their cooldownID; an interim "raw category set + HideByDefault
+  filter" fix then dropped 18 known Tracked Buffs (Lock and Load, Trueshot…). Final correct source = the settings
+  **data provider** `GetOrderedCooldownIDsForCategory` (see the picker LEARNING above). Both columns QA'd correct.
+  (4) **Doc fix:** the Warlock is **Gloomwick**, the Hunter is **Gloomvale** (handoff had them swapped).
+  No open bugs. Config.lua chunk 184/200 locals.
 - **Session end 2026-07-08 (fifth session) — the "secret-safe signals" session. BIG.** Reverse-engineered
   **ArcUI** (installed, readable) and cracked two things we'd previously called walls. Built a read-only
   probe (`/ga probe` + a movable `/ga capture` button, logging to `probeLog` → Claude reads it off disk) and

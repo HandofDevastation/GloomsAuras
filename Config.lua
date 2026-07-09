@@ -771,58 +771,86 @@ local PICK_COL_W = 208               -- width of each of the two columns
 C._pick = { cd = { rows = {}, data = {}, offset = 0 }, au = { rows = {}, data = {}, offset = 0 },
             allCd = {}, allAu = {}, search = "" }
 
--- Build the two source lists from the CDM: Essential/Utility → Cooldowns column;
--- TrackedBuff/TrackedBar → Buffs/Debuffs column (tagged Buff vs Debuff via `selfAura`:
--- true = on you, false/nil = on your target). Each item carries its default trigger `state`
--- + semantic `k`, so the column you pick from sets the right condition (and wording).
--- Build the two lists from the LIVE Cooldown Manager item frames — the exact set GloomsAuras
--- can actually hook (a spell left in the CDM's "Not Displayed" bucket has no frame, so it won't
--- appear here and can't be tracked; the picker never lists a spell that wouldn't work). Rebuilt
--- on every open, so it always reflects the current CDM + spec. Essential/Utility → Cooldowns
--- column; TrackedBuff/TrackedBar → Buffs/Debuffs (tagged Buff/Debuff via selfAura, Proc when
--- hasAura=false, e.g. Deathblow/Nightfall).
+-- Build the two source lists from the CDM's SETTINGS DATA PROVIDER — the exact ORDERED,
+-- displayed cooldownID set each viewer lays out (CooldownViewer.lua RefreshLayout calls
+-- `CooldownViewerSettings:GetDataProvider():GetOrderedCooldownIDsForCategory(cat)`). This is the
+-- authoritative "trackable" set and the right source for THREE reasons the alternatives got wrong:
+--   1. FRAME-INDEPENDENT — a frame clears its cooldownID the instant it's released/hidden
+--      (Blizzard's itemFramePool reset callback → ClearCooldownID → cooldownInfo=nil), and the
+--      Essential viewer hides items while inactive (`hideWhenInactive`); so a frame-scan dropped
+--      every ready-out-of-combat Essential cooldown (Rapid Fire, Aimed Shot, …).
+--   2. Respects the SAVED LAYOUT + Blizzard's HideByDefault→Hidden remap + isKnown — so it lists
+--      exactly what's displayed. The raw `GetCooldownViewerCategorySet` does NONE of that: it
+--      returns raw pre-remap IDs, which under-returned the tracked buffs, and pairing it with a
+--      manual HideByDefault filter then dropped known buffs the user DOES display (Lock and Load,
+--      Trueshot, Aspects — anything HideByDefault-by-default but placed into a tracked category).
+-- Essential/Utility → Cooldowns column; TrackedBuff/TrackedBar → Buffs/Debuffs (tagged Buff vs
+-- Debuff via `selfAura`: true = on you, false/nil = on target). Each item carries its default
+-- trigger `state` + semantic `k`, so the column you pick from sets the right condition + wording.
+-- Rebuilt on every open. Falls back to the raw category set (with our own isKnown + HideByDefault
+-- filtering) only if the data provider is somehow unavailable.
 local function BuildAuraLists()
   wipe(C._pick.allCd); wipe(C._pick.allAu)
-  local viewers = {
-    { EssentialCooldownViewer, "cd" }, { UtilityCooldownViewer, "cd" },
-    { BuffIconCooldownViewer,  "au" }, { BuffBarCooldownViewer,  "au" },
-  }
+  local E = Enum and Enum.CooldownViewerCategory
+  if not E then return end
+  local dp = CooldownViewerSettings and CooldownViewerSettings.GetDataProvider
+             and CooldownViewerSettings:GetDataProvider()
+  local HIDE = Enum.CooldownSetSpellFlags and Enum.CooldownSetSpellFlags.HideByDefault
   local seen = {}
-  for _, v in ipairs(viewers) do
-    local viewer, bucket = v[1], v[2]
-    local pool = viewer and viewer.itemFramePool
-    if pool and pool.EnumerateActive then
-      for frame in pool:EnumerateActive() do
-        local info
-        pcall(function() info = frame.GetCooldownInfo and frame:GetCooldownInfo() end)
-        -- Cooldown items can return nil GetCooldownInfo out of combat; recover via the registry.
-        if not info and frame.GetCooldownID and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
-          pcall(function()
-            local cid = frame:GetCooldownID()
-            if cid ~= nil and not issecret(cid) then info = C_CooldownViewer.GetCooldownViewerCooldownInfo(cid) end
-          end)
-        end
-        local sid = info and info.spellID
-        if sid and not issecret(sid) then
-          local k, tag = "cooldown", nil
-          if bucket == "au" then
-            -- selfAura is the reliable axis: true = on you (buff), false/nil = on target (debuff).
-            -- (hasAura is NOT a reliable proc signal — it also flags cooldown-granted buffs like
-            -- Aspect of the Turtle — so we don't tag procs separately.)
-            local sa = info.selfAura
-            local isBuff = (sa ~= nil and not issecret(sa) and sa == true)
-            k   = isBuff and "buff" or "debuff"
-            tag = isBuff and "Buff" or "Debuff"
+  local cats = {
+    { E.Essential, "cd" }, { E.Utility, "cd" },
+    { E.TrackedBuff, "au" }, { E.TrackedBar, "au" },
+  }
+  for _, c in ipairs(cats) do
+    local cat, bucket = c[1], c[2]
+    -- Primary: the viewer's own ordered/displayed list (already isKnown- + HideByDefault-filtered).
+    local ids, viaDP = nil, false
+    if dp and dp.GetOrderedCooldownIDsForCategory then
+      pcall(function() ids = dp:GetOrderedCooldownIDsForCategory(cat, false); viaDP = true end)
+    end
+    -- Fallback: raw category set (we filter unlearned + HideByDefault ourselves below).
+    if type(ids) ~= "table" and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCategorySet then
+      viaDP = false
+      pcall(function() ids = C_CooldownViewer.GetCooldownViewerCategorySet(cat, true) end)
+    end
+    if type(ids) == "table" then
+      for _, id in ipairs(ids) do
+        if id ~= nil and not issecret(id) then
+          local info
+          if dp and dp.GetCooldownInfoForID then pcall(function() info = dp:GetCooldownInfoForID(id) end) end
+          if not info and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
+            pcall(function() info = C_CooldownViewer.GetCooldownViewerCooldownInfo(id) end)
           end
-          local key = bucket .. ":" .. sid .. ":" .. k
-          if not seen[key] then
-            seen[key] = true
-            local name = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(sid)) or ("Spell " .. sid)
-            local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(sid)
-            local item = { spellID = sid, name = name, icon = icon,
-              state = (bucket == "cd") and "cd_ready" or "buff_active", k = k, tag = tag }
-            if bucket == "cd" then C._pick.allCd[#C._pick.allCd + 1] = item
-            else C._pick.allAu[#C._pick.allAu + 1] = item end
+          local sid = info and info.spellID
+          -- Only the fallback (raw set) path needs manual filtering; the DP list is pre-filtered.
+          local skip = false
+          if not viaDP and info then
+            if info.isKnown == false then skip = true end
+            local fl = info.flags
+            if HIDE and fl ~= nil and not issecret(fl) and FlagsUtil and FlagsUtil.IsSet
+               and FlagsUtil.IsSet(fl, HIDE) then skip = true end
+          end
+          if sid and not issecret(sid) and not skip then
+            local k, tag = "cooldown", nil
+            if bucket == "au" then
+              -- selfAura is the reliable axis: true = on you (buff), false/nil = on target (debuff).
+              -- (hasAura is NOT a reliable proc signal — it also flags cooldown-granted buffs like
+              -- Aspect of the Turtle — so we don't tag procs separately.)
+              local sa = info.selfAura
+              local isBuff = (sa ~= nil and not issecret(sa) and sa == true)
+              k   = isBuff and "buff" or "debuff"
+              tag = isBuff and "Buff" or "Debuff"
+            end
+            local key = bucket .. ":" .. sid .. ":" .. k
+            if not seen[key] then
+              seen[key] = true
+              local name = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(sid)) or ("Spell " .. sid)
+              local icon = C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(sid)
+              local item = { spellID = sid, name = name, icon = icon,
+                state = (bucket == "cd") and "cd_ready" or "buff_active", k = k, tag = tag }
+              if bucket == "cd" then C._pick.allCd[#C._pick.allCd + 1] = item
+              else C._pick.allAu[#C._pick.allAu + 1] = item end
+            end
           end
         end
       end
