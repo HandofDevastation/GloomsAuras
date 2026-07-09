@@ -387,9 +387,14 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   - Only partial charge signal: `C_SpellActivationOverlay` detects **procs** — but procs that
     grant a buff (e.g. Lock and Load) are already trackable as a **buff-active** condition, so
     that path is redundant.
-- **Placement requirement**: a spell must be placed on a CDM viewer (Edit Mode → Cooldown
-  Manager), not merely in the registry, to be tracked. `/ga charges` reports charge status;
-  `/ga debug` shows FOUND/NOT FOUND + state.
+- **Placement requirement (CONFIRMED from CDM source 2026-07-08)**: a spell must be in a TRACKED CDM
+  section — Essential / Utility / Tracked Buffs / Tracked Bars — to be tracked. "Not Displayed" items get
+  moved to a separate **Hidden** category (`HiddenSpell`/`HiddenAura`, via a `HideByDefault` flag + saved
+  layout — `CooldownViewerSettingsDataProvider.lua`), so they have **no item frame** and GloomsAuras can't
+  hook them. The **trigger picker now sources from the live item frames**, so it only lists trackable spells
+  (never a "Not Displayed" one). `/ga debug` = "verify tracking" (FOUND/NOT FOUND per display); `/ga charges`
+  reports charge status. (Bonus source find: `CooldownViewerMixin:RefreshActiveFramesForTargetChange` — the
+  CDM DOES re-scan on target change; relevant to the DoT reappear-lag known issue.)
 
 ## Diagnostics / commands
 - `/ga` — open the options panel. `/ga help` — list commands.
@@ -571,16 +576,18 @@ The shadow build gives "≥1 available." Getting the EXACT count is PARTLY possi
 Revisit: expose a charge-count signal (works fully for 2-charge, degrades to buckets for 3+). Explore
 `C_Secrets` predicates only if buckets aren't enough (they return SECRET booleans → need a widget sink).
 
-### Trigger-chooser UX (Jason-requested 2026-07-08, AFTER Aimed Shot)
-The condition/aura picker (`BuildAuraList` in Config.lua) lists CDM items with confusing semantics:
-1. **Debuffs are labelled "buff."** Haunt/Agony are `selfAura=false` (debuffs ON the target) but show
-   under the "Buff" category tag. We now READ `selfAura` (see §9) — use it to label buff vs **debuff**
-   (target) in the picker + the trigger condition rows, and probably reword the states ("debuff is
-   active" for a target aura).
-2. **Many spells appear TWICE** — once as a cooldown (Essential/Utility) and once as an aura (Buff/Bar),
-   both spellID-identical. Confusing. Options to explore: merge the two into one picker entry that lets
-   you choose "track its cooldown" vs "track its aura," or clearly tag each (e.g. "Haunt (cooldown)" vs
-   "Haunt (debuff)"). Ties into the state defaulting in `TrigAddLeaf` (already uses kind → buff/cd).
+### Trigger-chooser UX — ✅ DONE + QA'd (2026-07-08). Two-panel picker (Config.lua).
+Rewrote the condition picker (`BuildAuraLists` + BuildPicker/RefreshPicker on `C._pick`): **two columns** —
+Cooldowns (Essential/Utility) | Buffs & Debuffs (TrackedBuff/Bar) — each independently scrolled, with a
+shared **search** box on top (padding: search at y-46, headers at -84, rows at -104). Labels come from
+`selfAura`: **(Buff)** = on you, **(Debuff)** = on target; the condition rows + wording follow via
+`StateLabel(state, k)` → "buff is active (on you)" / "debuff is active (on target)" / "cooldown is ready".
+Picking from a column sets the right default state (`TrigAddLeaf(item, ti)` carries `item.state` + `item.k`);
+the state click now toggles within its family (active↔inactive / ready↔on-cd), not all four. **The picker
+sources from the LIVE item frames** (not the category set), so it only ever lists spells with a trackable
+frame (see Placement note). A **(Proc)** tag was tried via `hasAura=false` but DROPPED — `hasAura` also flags
+cooldown-granted buffs (Aspect of the Turtle), so it's not a reliable proc signal. Future proc-detection: a
+real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears in both columns.
 
 ### Other pending / deferred
 - **Override display polish (optional, offered, Jason didn't decide):** show a spell's **override** name+
