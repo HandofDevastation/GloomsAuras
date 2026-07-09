@@ -38,6 +38,16 @@ it MIRRORS the Blizzard Cooldown Manager**, whose state is computed in Blizzard'
 context and exposed as plain frame state / transitions we can hook. **Only spells actually
 PLACED in a CDM viewer are trackable** (registry ≠ placed).
 
+> **UPDATE 2026-07-08 (VERIFIED — the rule was too strict; stop apologizing for "breaking" it).**
+> The real constraint is ONLY "no arithmetic/compare/truth-test on a secret." We MAY read an aura's
+> **presence** (via the CDM item's native `frame.auraInstanceID` — secret or not, its *existence* is
+> the signal) and **duration** (via `C_UnitAuras.GetAuraDuration` duration OBJECTS), choosing the unit
+> from `info.selfAura`. This is **PROVEN for target DoTs** (Warlock, open-world, 8 `/ga probe` captures
+> across target swaps) and is how we'll fix DoT tracking — the pure `IsActive()` mirror gets target
+> swaps WRONG. Mirroring is still correct for buffs/cooldowns; this just adds a sanctioned, tested path
+> for auras the mirror can't handle. A charge variant (shadow-cooldown) is FOUND but UNVERIFIED. Full
+> write-up + verification status: **API-NOTES §9**. Reference impl: **ArcUI** (installed, readable).
+
 ## Files
 - `GloomsAuras.toc` — Interface 120007; load order: `Libs\*` → Core → Displays → CDM →
   `Media\TextureManifest.lua` → Config.
@@ -339,6 +349,14 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
 - **Non-charge cooldown availability WORKS**: hook globals `CooldownFrame_Set`/`CooldownFrame_Clear`
   filtered to `item:GetCooldownFrame()`, plus `item:OnCooldownDone`. Seed initial state OOC via
   `GetSpellCooldown`. Never reads a secret.
+- **DoTs / target debuffs — the `IsActive()` mirror is NOT enough (VERIFIED 2026-07-08, Warlock, 8
+  captures):** the Tracked-Bar `IsActive()` reads correctly when POLLED, but (1) nothing re-polls it on
+  a target SWAP (no `OnActiveStateChanged` fires) → it goes stale on screen, and (2) a spell enrolled in
+  TWO viewers (Haunt in Essential `cat=0` + BuffBar `cat=3`) makes `Discover` map both frames to one
+  spellID → they fight over the shared `buffActive/available[]` var = the "goes random" symptom. The
+  proven fix: read `frame.auraInstanceID` + `C_UnitAuras` on the `selfAura` unit, re-eval on
+  `PLAYER_TARGET_CHANGED`, and disambiguate matching by cooldownID. **Proven correct across 8 target-swap
+  captures; NOT yet built or QA'd. UNVERIFIED in instance/M+/raid.** Detail: API-NOTES §9.
 - **Trigger `nil`-availability default (fixed 2026-07-07):** an idle-available cooldown never fires
   a transition and is secret in combat, so `available[sid]` stays **nil**. `EvalDisplay` (auto,
   no-trigger) already defaulted nil→ready, but `EvalCondition` (cd_ready as a trigger condition)
@@ -360,7 +378,10 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
     can't feed a secret duration to a timer widget. Works out of combat only.
   - **Charge-spell availability**: `GetSpellCharges` AND `GetSpellCastCount` are both
     `SecretWhenCooldownsRestricted`; `IsSpellUsable` ignores cooldown AND charges (always true).
-    So "do I have a charge" is unknowable in combat. Aimed Shot etc. can't do "available."
+    So directly READING "do I have a charge" is unknowable in combat. **⚠ BUT (2026-07-08) a possible
+    DOOR was found — the "shadow cooldown" technique (ArcUI): route a duration OBJECT through a hidden
+    Cooldown widget and read its `IsShown()` to DERIVE availability without reading the count. UNVERIFIED
+    for real charge spells — must be proven on Aimed Shot (Hunter) before trusting it. API-NOTES §9.3.**
   - Only partial charge signal: `C_SpellActivationOverlay` detects **procs** — but procs that
     grant a buff (e.g. Lock and Load) are already trackable as a **buff-active** condition, so
     that path is redundant.
@@ -378,6 +399,14 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
 - `/ga charges` — which cooldowns support availability tracking (charge spells flagged). Run OOC.
 - `/ga trace` — per-display trigger diagnostic (shown?, buffActive/available mirror, item cooldown
   fields, each condition's eval). Run IN the failing state; makes trigger bugs a 30-sec find.
+- `/ga probe [filter]` — EXHAUSTIVE read-only secret-safe-signals dump (per CDM item: `selfAura`,
+  `auraInstanceID` present?, `C_UnitAuras` player/target presence + duration, which hook methods the
+  frame exposes, shadow-cooldown readiness). **Writes each capture to the SavedVariables file**
+  (`WTF/Account/AELWYN/SavedVariables/GloomsAuras.lua` → `GloomsAurasDB.probeLog`, last 40) so Claude
+  reads it straight off disk after a `/reload` — no transcription, and captures can be taken at exact
+  states. `/ga probe clear` wipes the log.
+- `/ga capture` — a movable **CAPTURE button**: click it at each game state (mid-combat, right after a
+  target swap) to fire a probe without typing. Built for the §9 investigation.
 - `/ga add|remove|list|pos|size|preview|test` — legacy/back-door commands (panel is primary).
 
 ## SavedVariables data model  (schema 2 — profiles, since 2026-07-08)
@@ -462,6 +491,42 @@ migration.)
 
 ## NEXT / pending
 
+### ▶ ACTIVE THREAD (2026-07-08) — secret-safe DoT tracking (Jason's Affliction Warlock)
+**DoT approach VERIFIED (API-NOTES §9). Step 1 SHIPPED + QA'd — and it fixed the target-swap for FREE.**
+Root-cause bugs (§9.2) were (1) no re-eval on target change and (2) spellID-only matching COLLIDING when a
+spell sits in two viewers (Haunt = Essential `cat=0` + BuffBar `cat=3`). **Jason wants to test EVERYTHING —
+one step per QA pass; never declare done before he confirms in-game.**
+
+- **Step 1 (frameKind disambiguation) — DONE + COMMITTED, QA'd on Warlock AND Hunter.** Route state by a
+  per-FRAME role (`CDM.frameKind`) so a spell's cooldown entry can't clobber its aura entry's `buffActive`
+  (and vice-versa); aura wins for the per-spell `kind` (auto path). Fixed the "goes random" flicker.
+  **SURPRISE (verified): it ALSO fixed the target-swap** — once the cooldown entry stopped stomping it, the
+  BAR entry's own `OnActiveStateChanged` (fires when the DoT leaves the current target) drives hide/show
+  correctly. So the planned "Step 2" (`PLAYER_TARGET_CHANGED` + `auraInstanceID`) turned out **UNNECESSARY
+  for correctness**. QA'd on Warlock: aura follows current target — shows on the DoTted dummy, hides on a
+  clean one, returns on swap-back, hides on expiry; no errors, no flicker.
+- **KNOWN ISSUE (minor; Jason deferred it) — reappear LAG.** Swapping BACK to a DoTted target occasionally
+  lags ~0.5s before the aura returns (sometimes instant). Root cause = the CDM's target re-scan latency (it
+  only knows the DoT is on the new target after its `UNIT_AURA`-driven rescan; we update exactly then).
+  Re-polling the CDM's own state CAN'T beat this (its flag flips + fires its event simultaneously). The ONLY
+  lever = scan the target OURSELVES on `PLAYER_TARGET_CHANGED` via `C_UnitAuras` (by spellID), independent of
+  the CDM — UNVERIFIED (secret-safety in combat) → needs a probe first. Not worth derailing; revisit later.
+  (ArcUI has the same constraint; its "High Frequency Updates" toggle is its mitigation.)
+- **PENDING QA (in order):**
+  1. **Hunter regression — ✅ PASSED (2026-07-08).** Existing auras behave unchanged (Rapid Fire cd, Trick
+     Shots buff, "Precise Shots active AND Kill Shot cd_ready" combo all clean). Step 1 committed.
+  2. **Multi-target DoT** — Haunt is 1-target; test a multi-target DoT (Agony on 2–3 dummies, swap among
+     them). Expected fine (the CDM tracks the debuff on the CURRENT TARGET, instance-agnostic via `IsActive`),
+     but UNTESTED. NOTE the semantic: we track "is it on my CURRENT target," NOT "on any enemy" or stack count.
+  3. **⏳ Instance / M+ / raid** — stricter secrecy; `IsActive`/`auraInstanceID` may go SECRET. Biggest
+     unknown. Do NOT call the DoT feature "done" until tested in stricter content.
+- **THEN (separate, Hunter): charge "shadow cooldown"** for Aimed Shot (API-NOTES §9.3). UNVERIFIED — prove
+  the 4-state `IsShown()` map at 2/1/0 charges + resolve the §5 tension; first fix `GetCooldownInfo=nil` on
+  Essential/Utility cooldown items (spellID acquisition).
+- **Optional payoff:** a real **duration countdown** on auras (`GetAuraDuration` → duration object → bar).
+- **Tooling:** `/ga probe [filter]` + `/ga capture`; captures land in `probeLog` (read off disk). Don't
+  delete/rewrite the probe code until this thread closes.
+
 ### Groups + Profiles — ALL THREE PHASES DONE ✅ (spec: [docs/GROUPS-PROFILES-DESIGN.md](GROUPS-PROFILES-DESIGN.md))
 - **Phase 1 — Groups data + engine.** ✅ **DONE + QA'd 2026-07-07** (see BUILT list). Committed.
 - **Phase 2 — Grouped left pane + Manage drawer.** ✅ **DONE + QA'd 2026-07-07** (see BUILT list).
@@ -500,6 +565,13 @@ Disabled ✅ shipped. Remaining:
 - **Export/import** strings for sharing (later; naturally follows Profiles).
 
 ## Current in-game context
+- **Jason's MAIN this season is Affliction Warlock** (added 2026-07-08) — char **"Gloomvale - Stormrage"**,
+  account `AELWYN`. His CDM **Tracked Bars** hold Haunt (48181), Corruption (146739), Agony (980), Unstable
+  Affliction (1259790), Seed of Corruption (27243) + the Curses; **Tracked Buffs** incl. Nightfall (264571);
+  Burning Rush (111400, a self-buff that sits in BuffBar → `selfAura=true`). He also runs **ArcUI**, which
+  tracks these DoTs correctly — the reference implementation for the §9 approach. The Hunter below is still
+  relevant for the charge (Aimed Shot) work. **QA discipline reminder: he wants to be thorough; frame every
+  build as a hypothesis to verify in-game, never as done.**
 - Jason plays **Marksmanship Hunter** (**Dark Ranger** hero talents). Relevant IDs: Trick Shots buff
   **257621**, Rapid Fire **257044** (non-charge cd, works), Aimed Shot **19434** (2 charges — availability
   walled), Precise Shots **260240** (buff), **Kill Shot 53351 → override Black Arrow 466930** (Black Arrow

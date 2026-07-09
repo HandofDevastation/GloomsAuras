@@ -17,10 +17,17 @@ context and stores a **plain boolean** (`item.isActive`) + shown/hidden frame st
 hook that. Full rationale + verified API in **[docs/API-NOTES.md](docs/API-NOTES.md)** —
 read it before touching CDM/secret-value code.
 
+> **Nuance (VERIFIED 2026-07-08 — see [docs/API-NOTES.md](docs/API-NOTES.md) §9).** "Never reads aura
+> data" was too strict. The real rule is "no arithmetic/compare/truth-test on a secret." We MAY read an
+> aura's **presence** (the CDM item's `frame.auraInstanceID` — its existence is the signal, secret or not)
+> and **duration** (duration objects), choosing the unit from `info.selfAura`. This is the tested path for
+> **target DoTs**, which the plain-boolean mirror gets wrong on target swaps. Don't apologize for it.
+
 Load-bearing rules:
-- Never read aura fields for logic. Match spells by **config** ids only
+- Never do arithmetic/comparison on secret aura values. Match spells by **config** ids only
   (`cooldownInfo.spellID` / `overrideSpellID` / `linkedSpellIDs`), never `GetSpellID()`/
-  `GetAuraData()` (those touch secret aura data in combat).
+  `GetAuraData()` for matching (those touch secret aura data in combat). Reading aura *presence/
+  duration* secret-safely (API-NOTES §9) is allowed.
 - Guard every combat-value read with `issecretvalue()` before any operator.
 - Hook the **four persistent viewer frame instances** and **individual item frames**, not
   the shared mixin table (`Mixin` copies methods onto frames — a table hook won't reach them).

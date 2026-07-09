@@ -222,6 +222,12 @@ a platform wall, not a fixable bug.
   partial signal: `C_SpellActivationOverlay.IsSpellOverlayed(spellID)` + the
   `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW/HIDE` events detect **procs** (e.g. Lock and Load) —
   non-secret, but only the proc case, not normal charge availability.
+  - **⚠ POSSIBLE DOOR (UNVERIFIED, 2026-07-08) — the "shadow cooldown" technique (§9.3).** ArcUI
+    DERIVES charge availability without reading the count: feed a duration OBJECT
+    (`GetSpellChargeDuration`/`GetSpellCooldownDuration`, GCD-stripped) into a hidden `Cooldown`
+    widget via `SetCooldownFromDurationObject`, then read its **`IsShown()`** (a plain bool). In our
+    probe this feed ran IN COMBAT without throwing — but **no real charge spell tested**, and it sits
+    in tension with §5 above. Must be proven on Aimed Shot before this wall is retired. See §9.3.
 - **Compound triggers** ("buff present AND cooldown ready") work when the cooldown is a
   non-charge spell (both halves are plain bools). Charge-spell conditions can't be satisfied
   reliably → treated as unknown (won't falsely fire).
@@ -259,6 +265,77 @@ secrecy; confirm it still fires inside an encounter = **PROBE D1**. Per-display 
   will report what's found.)
 - **Enumerate API** — does `viewer:GetItemFrames()` vs `viewer.itemFramePool:EnumerateActive()` work from addon code?
 - **D1** — does custom `PlaySoundFile` fire while in a restricted encounter?
+- **AIID-1 [was B1, RESOLVED open-world 2026-07-08]** — DoT-on-target via `frame.auraInstanceID`
+  + `C_UnitAuras` on the `selfAura` unit is CORRECT across target swaps (Warlock, 8 `/ga probe`
+  captures — §9). ⏳ **STILL UNVERIFIED in instance / M+ / raid** (stricter secrecy — `auraInstanceID`
+  may go SECRET there; `present()`=secret⇒present *should* cover it, but the full flow is untested).
+- **CHG-1 [charge shadow-cooldown, §9.3]** — verify the 4-state `IsShown()` map with a REAL charge
+  spell (Aimed Shot at 2/1/0 charges) on the Hunter, AND resolve the §5 `AllowedWhenUntainted`
+  tension. Blocker: Essential/Utility cooldown items returned `GetCooldownInfo=nil` OOC/no-target
+  (populated in combat WITH a target) — sort spellID acquisition for cooldown items first.
+
+---
+
+## 9. Secret-safe SIGNALS — reading aura/charge state directly (NOT via IsActive)
+**Reframes the "never read aura data" premise. DoT half VERIFIED (Warlock, open-world,
+2026-07-08, 8 `/ga probe` captures across target swaps). Charge half FOUND (ArcUI) but UNVERIFIED.**
+
+The founding rule was stricter than the platform requires. The real constraint is ONLY: *never do
+arithmetic / comparison / truth-test / `#` / concat on a secret value.* You MAY read an aura's
+**presence** and **duration** secret-safely by routing the secret through a native sink that returns
+a plain boolean or an opaque object. Reference implementation: **ArcUI** (installed & readable at
+`_retail_/Interface/AddOns/ArcUI/` — `ArcUI_Core.lua`, `CDM_Enhance/ArcUI_CooldownState.lua`); it
+mirrors the SAME CDM we do, then reads auras directly under 122 `issecretvalue` guards.
+
+### 9.1 DoT / target-debuff presence — VERIFIED WORKS
+- CDM item frames carry a native **`frame.auraInstanceID`** (set by the secure scan via
+  `SetAuraInstanceInfo`/`OnAuraInstanceInfoSet`). Probe confirmed every viewer item exposes
+  `OnAuraInstanceInfoSet` / `OnAuraInstanceInfoCleared` / `RefreshData` / `SetAuraInstanceInfo`.
+- **Presence WITHOUT reading** (ArcUI's `HasAuraInstanceID`): `nil`/`0` ⇒ absent; **secret ⇒ PRESENT**
+  (can't compare it, but its existence IS the signal); plain non-zero ⇒ present.
+- **Pick the unit from `info.selfAura`** (§3.3): `true` ⇒ `"player"` (buff), `false` ⇒ `"target"`
+  (debuff). Then `C_UnitAuras.GetAuraDataByAuraInstanceID(unit, aiid)` (non-nil ⇒ present) and
+  `C_UnitAuras.GetAuraDuration(unit, aiid)` (returns a duration OBJECT → feed a bar, never read it).
+- **CAVEAT — never cross-unit.** auraInstanceIDs are unique per-unit, so querying the WRONG unit can
+  false-positive (probe P6/P8: querying `player` for Haunt's TARGET instance returned PRESENT). Query
+  ONLY the selfAura unit.
+- **Measured (8 captures — Haunt 48181, Agony 980, UA 1259790, Corruption 146739):** DoTs up on target →
+  `auraInstanceID` = a plain readable int (15/16/18/20/23…, NOT secret in open-world), `target[PRESENT]`,
+  `dur target[obj:userdata]`; swap-away → cleared to `nil`/absent; swap-back → returned. **Correct in
+  EVERY state**, unlike our IsActive mirror.
+- ⏳ **UNVERIFIED**: instance / M+ / raid (auraInstanceID may be secret there — present()=secret⇒present
+  should handle it, untested). And NONE of this is built or QA'd in the addon yet.
+
+### 9.2 Why our current mirror fails on DoTs (root causes — same captures)
+1. **No re-eval on target change.** The Bar item's `IsActive()` reads correctly when POLLED, but we only
+   re-read on `OnActiveStateChanged`, which does NOT fire on a target swap → stale on screen. Fix: also
+   re-evaluate on **`PLAYER_TARGET_CHANGED`**.
+2. **spellID-only matching COLLIDES.** A spell enrolled in MULTIPLE viewers (Haunt = Essential `cat=0`
+   AND BuffBar `cat=3`) makes `Discover` map BOTH frames to the same spellID; both write the same
+   `buffActive/available[spellID]` and fight (the cooldown entry's IsActive stays stuck true on swap
+   while the bar entry flips) = the "goes random" symptom. Fix: disambiguate by **cooldownID** (ArcUI
+   keys on it) or (spellID + desired category), not spellID alone.
+
+### 9.3 Charge availability — the "shadow cooldown" — FOUND, UNVERIFIED
+- ArcUI never reads the charge COUNT. It feeds a **duration object** (`C_Spell.GetSpellChargeDuration(id,
+  true)` + `GetSpellCooldownDuration(id,true)`, GCD-stripped) into two hidden `Cooldown` widgets
+  (`SetDrawSwipe/Edge(false)`, `SetHideCountdownNumbers(true)`), then reads each widget's **`IsShown()`**
+  for a 4-state map: main+charge shown = 0 charges; main hidden + charge shown = 1+ available; main only =
+  non-charge on cd; both hidden = ready.
+- **Partial evidence (our probe):** the duration-object feed ran IN COMBAT without throwing and gave a
+  readable `IsShown()` for a non-charge cd (P3). Encouraging.
+- **⚠ UNVERIFIED / open questions:** (a) NO real charge spell tested — the 4-state map is unproven;
+  (b) `IsShown()` LAGS one frame after a feed (ArcUI defers 0.1s; our probe captures both immediate + +0.1s);
+  (c) it appears to CONTRADICT §5 (`SetCooldownFromDurationObject` = `AllowedWhenUntainted` ⇒ should reject
+  a secret duration from tainted code) — either the object isn't secret, or the object path differs from a
+  raw secret. **Resolve all three on the Hunter (Aimed Shot 19434) before trusting it.** If it holds it
+  RETIRES the charge WALL (§5/§7) for DISPLAY purposes (the readback is a plain bool we own → composable in
+  triggers + edge-detectable for sound).
+
+### 9.4 The unifying principle
+Both halves are the same move: **you cannot read a secret, but you can route it through a native sink that
+exposes a plain boolean** — aura-instance existence (DoTs) or a Cooldown widget's shown-state fed a duration
+object (charges). This raises the ceiling; it does NOT change the "no arithmetic/compare on a secret" rule.
 
 ---
 
