@@ -559,10 +559,12 @@ one step per QA pass; never declare done before he confirms in-game.**
      difficulty-gated), and the captures show no content-based aura secrecy. Banked as sufficient; the
      `secret⇒present` fallback remains reasoned-but-unexercised. Bonus: the charge **shadow** readback returned a
      clean value even while raw cooldown fields were secret — confirms that mechanism survives combat secrecy.
-  4. **⏳ Deathblow / proc (`hasAura=false`) tracking — UNVERIFIED (do next session, quick).** We fixed proc
-     LABELING (dropped the unreliable `hasAura` tag), but never confirmed a proc buff actually LIGHTS UP. Test:
-     make a "Deathblow — buff is active" aura on the Hunter, fish the proc on a dummy. If it doesn't fire, the
-     `hasAura=false` path (activation-driven, no aura instance) needs its own handling — see §9.1 (no auraID).
+  4. **Deathblow / proc (`hasAura=false`) tracking — ✅ PASSED (2026-07-09, sixth session; Hunter/dummy).**
+     Made a "Deathblow — buff is active" aura, fished the proc off Aimed Shot/Rapid Fire — it **lights up** on
+     the proc and hides when consumed. So a `hasAura=false` activation-driven proc DOES register through our
+     normal buff mirror (`item:IsActive()` / `OnActiveStateChanged`); **no separate activation-overlay path
+     (§9.1) is needed.** The `hasAura` flag matters only for picker LABELING (already dropped as unreliable),
+     not for whether the buff tracks.
 - **Charge "shadow cooldown" (Aimed Shot) — ✅ BUILT + QA'd + committed (Hunter, 2026-07-08).**
   `CDM.chargeShadow[sid]` = a hidden `Cooldown` fed the GCD-stripped `GetSpellCooldownDuration`; its
   `OnShow → available=false` / `OnHide → available=true` fire exactly at the 0↔1-charge boundary; re-fed on
@@ -590,8 +592,10 @@ note).** Highest-priority OPEN items:
 - ~~**Instance / M+ / raid check**~~ ✅ **BANKED (2026-07-08, sixth session)** — follower dungeon passed; behaved
   identically to open-world combat (auras readable, cooldowns secret-in-combat as always). Jason's call: rules
   don't vary by content tier, so sufficient. See QA STATUS #3.
-- **Deathblow / proc (`hasAura=false`) tracking** — quick Hunter test: does a proc buff actually light up?
+- ~~**Deathblow / proc (`hasAura=false`) tracking**~~ ✅ **PASSED (2026-07-09, sixth session)** — proc buff
+  lights up through the normal buff mirror; no separate activation path needed. See QA STATUS #4.
 - **Exact charge COUNT** — revisit (2-charge spells can derive it from the charge shadow; backlog item below).
+  **← the only Track-A item left; everything else here is verified.**
 
 **B. Then resume the EFFECTS/appearance push** (Glow ✅ + grouped triggers ✅ + eye-preview/Disabled ✅ shipped):
 0. ~~**⚠ QA a GROUPED trigger IN COMBAT first.**~~ ✅ **DONE + QA'd (2026-07-08, sixth session; Hunter/dummy).**
@@ -678,8 +682,10 @@ real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears
   cooldowns (Rapid Fire) because hidden frames clear their cooldownID; an interim "raw category set + HideByDefault
   filter" fix then dropped 18 known Tracked Buffs (Lock and Load, Trueshot…). Final correct source = the settings
   **data provider** `GetOrderedCooldownIDsForCategory` (see the picker LEARNING above). Both columns QA'd correct.
-  (4) **Doc fix:** the Warlock is **Gloomwick**, the Hunter is **Gloomvale** (handoff had them swapped).
-  No open bugs. Config.lua chunk 184/200 locals.
+  (4) **Deathblow / proc verified** — a `hasAura=false` activation proc DOES light up through the normal buff
+  mirror; no separate activation path needed (QA STATUS #4). (5) **Doc fix:** the Warlock is **Gloomwick**, the
+  Hunter is **Gloomvale** (handoff had them swapped). Only Track-A item left = exact charge COUNT (a backlog
+  build, not a correctness gap). No open bugs. Config.lua chunk 184/200 locals.
 - **Session end 2026-07-08 (fifth session) — the "secret-safe signals" session. BIG.** Reverse-engineered
   **ArcUI** (installed, readable) and cracked two things we'd previously called walls. Built a read-only
   probe (`/ga probe` + a movable `/ga capture` button, logging to `probeLog` → Claude reads it off disk) and
