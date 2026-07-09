@@ -273,6 +273,17 @@ PLACED in a CDM viewer are trackable** (registry ≠ placed).
   for an aura, or `group.enabled` in a group's **Load Rule** (both places). Greys the list row when off.
   A one-time **v2 migration** (`prof._eyeFixed=2`) re-enables every aura to recover from (a) the old eye
   mis-setting `enabled=false` and (b) an interim switch's Lua-idiom bug (see LEARNINGS).
+- ✅ **QA'd 2026-07-08 — Target-DoT / debuff tracking** (`bc6cdb0`). DoT auras now follow the current target
+  (verified Warlock: single-target, target-swap, multi-target Agony; Hunter: no regression). Route CDM state
+  by a per-FRAME role (`CDM.frameKind`) so a spell in two viewers stops clobbering its own state. See ACTIVE
+  THREAD + API-NOTES §9. ⏳ instance/raid unverified.
+- ✅ **QA'd 2026-07-08 — Aimed Shot / charge-spell availability** (`74a6ae0`). Hidden shadow `Cooldown` fed a
+  duration OBJECT → `IsShown()` gives ≥1-charge-castable secret-safely; flows into `cd_ready`. Verified over a
+  full charge cycle incl. procs/reset. API-NOTES §9.3. ⏳ instance/raid unverified; exact count = backlog.
+- ✅ **QA'd 2026-07-08 — Two-panel trigger picker** (`e98d706`). Cooldowns | Buffs & Debuffs columns + search;
+  `selfAura` (Buff/Debuff) labels + unit-aware wording; sourced from live frames (only lists trackable spells).
+- ✅ **QA'd 2026-07-08 — `/ga probe` + `/ga capture`** — read-only secret-safe-signal diagnostics that log to
+  `GloomsAurasDB.probeLog` (Claude reads it off disk after `/reload`). Keep until the CDM-tracking thread closes.
 
 ## Hard-won LEARNINGS (verified — do NOT rediscover)
 - **The `a and b or c` idiom BREAKS when `b` is `nil`/`false` — never use it to assign nil.** A "Disabled"
@@ -519,14 +530,18 @@ one step per QA pass; never declare done before he confirms in-game.**
   lever = scan the target OURSELVES on `PLAYER_TARGET_CHANGED` via `C_UnitAuras` (by spellID), independent of
   the CDM — UNVERIFIED (secret-safety in combat) → needs a probe first. Not worth derailing; revisit later.
   (ArcUI has the same constraint; its "High Frequency Updates" toggle is its mitigation.)
-- **PENDING QA (in order):**
-  1. **Hunter regression — ✅ PASSED (2026-07-08).** Existing auras behave unchanged (Rapid Fire cd, Trick
-     Shots buff, "Precise Shots active AND Kill Shot cd_ready" combo all clean). Step 1 committed.
-  2. **Multi-target DoT** — Haunt is 1-target; test a multi-target DoT (Agony on 2–3 dummies, swap among
-     them). Expected fine (the CDM tracks the debuff on the CURRENT TARGET, instance-agnostic via `IsActive`),
-     but UNTESTED. NOTE the semantic: we track "is it on my CURRENT target," NOT "on any enemy" or stack count.
-  3. **⏳ Instance / M+ / raid** — stricter secrecy; `IsActive`/`auraInstanceID` may go SECRET. Biggest
-     unknown. Do NOT call the DoT feature "done" until tested in stricter content.
+- **QA STATUS:**
+  1. **Hunter regression — ✅ PASSED (2026-07-08).** Existing auras unchanged (Rapid Fire cd, Trick Shots
+     buff, "Precise Shots active AND Kill Shot cd_ready" combo).
+  2. **Multi-target DoT — ✅ PASSED (2026-07-08).** Agony on 2 dummies, swapping between them: stays shown on
+     both, hides on a clean target. Semantic confirmed: tracks "on my CURRENT target," NOT any-enemy/count.
+  3. **⏳ Instance / M+ / raid — UNVERIFIED (do next session).** Stricter secrecy; `IsActive`/`auraInstanceID`
+     may go SECRET. **Biggest correctness unknown** — do NOT call DoT/charge tracking "done" until tested in an
+     instance. (Both degrade gracefully — a secret read leaves the display as-is, no error — but unproven.)
+  4. **⏳ Deathblow / proc (`hasAura=false`) tracking — UNVERIFIED (do next session, quick).** We fixed proc
+     LABELING (dropped the unreliable `hasAura` tag), but never confirmed a proc buff actually LIGHTS UP. Test:
+     make a "Deathblow — buff is active" aura on the Hunter, fish the proc on a dummy. If it doesn't fire, the
+     `hasAura=false` path (activation-driven, no aura instance) needs its own handling — see §9.1 (no auraID).
 - **Charge "shadow cooldown" (Aimed Shot) — ✅ BUILT + QA'd + committed (Hunter, 2026-07-08).**
   `CDM.chargeShadow[sid]` = a hidden `Cooldown` fed the GCD-stripped `GetSpellCooldownDuration`; its
   `OnShow → available=false` / `OnHide → available=true` fire exactly at the 0↔1-charge boundary; re-fed on
@@ -545,9 +560,18 @@ one step per QA pass; never declare done before he confirms in-game.**
 - **Phase 3 — Profiles.** ✅ **DONE + QA'd 2026-07-08** (see BUILT list): schema-2 migration + `GA.global`/
   `GA.db` split (`fc41649`), switcher UI (`6deae65`). Feature complete; nothing left open here.
 
-### ▶▶ START HERE NEXT SESSION — Effects work is IN PROGRESS
-Jason kicked off an **effects/appearance** push (2026-07-08). Glow ✅ + grouped triggers ✅ + eye-preview /
-Disabled ✅ shipped. Remaining:
+### ▶▶ START HERE NEXT SESSION
+**Fifth session (2026-07-08) shipped the big secret-safe wins — DoT/target-debuff tracking, Aimed Shot charge
+availability, and the two-panel trigger picker — all committed + pushed (see ACTIVE THREAD + fifth-session
+note).** Highest-priority OPEN items:
+
+**A. Finish verifying the CDM-tracking work (ACTIVE THREAD above has full detail):**
+- **Instance / M+ / raid check** — the one real correctness unknown for DoT + charge tracking (stricter
+  secrecy; both degrade gracefully but are unproven there).
+- **Deathblow / proc (`hasAura=false`) tracking** — quick Hunter test: does a proc buff actually light up?
+- **Exact charge COUNT** — revisit (2-charge spells can derive it from the charge shadow; backlog item below).
+
+**B. Then resume the EFFECTS/appearance push** (Glow ✅ + grouped triggers ✅ + eye-preview/Disabled ✅ shipped):
 0. **⚠ QA a GROUPED trigger IN COMBAT first.** The AND/OR/NONE engine is committed and the editor + flat
    triggers are verified, but a trigger containing an actual GROUP was never driven end-to-end in combat
    (build `(X OR Y) AND Z` on a dummy, confirm it gates correctly; also test a **NONE** group = NOT).
@@ -615,6 +639,25 @@ real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears
   Aimed Shot, plus experiments. He now also has an **"MM Hunter"** group (load rule = spec).
 - His active character/profile is **"Gloomvale - Stormrage"** (account folder `AELWYN`). After Phase-3 QA
   he may have leftover test profiles (e.g. "Copy Test") — harmless; deletable from the Profiles drawer.
+- **Session end 2026-07-08 (fifth session) — the "secret-safe signals" session. BIG.** Reverse-engineered
+  **ArcUI** (installed, readable) and cracked two things we'd previously called walls. Built a read-only
+  probe (`/ga probe` + a movable `/ga capture` button, logging to `probeLog` → Claude reads it off disk) and
+  used it to VERIFY, then SHIP:
+  1. **DoT / target-debuff tracking** (`bc6cdb0`) — Haunt & co. now follow the current target. Root cause: a
+     spell in TWO viewers (Haunt = Essential cooldown + BuffBar aura) had both frames writing one `buffActive`
+     var and fighting. Fix = route state by a per-FRAME role (`CDM.frameKind`). Fixed the flicker AND the
+     target-swap for free. QA'd Warlock (single/swap/multi-target) + Hunter (no regression).
+  2. **Aimed Shot charge availability** (`74a6ae0`) — the charge WALL is RETIRED. Can't read the count
+     (secret), but a hidden shadow `Cooldown` fed the GCD-stripped duration OBJECT (which does NOT throw in
+     combat) exposes `IsShown()` = a plain bool: `mainShown==false` ⇔ ≥1 charge castable. Verified on Aimed
+     Shot 2→1→0→1→2. Flows into existing `cd_ready`. (§9.3.)
+  3. **Two-panel trigger picker** (`e98d706`) — Cooldowns | Buffs & Debuffs, search, `selfAura`-based
+     (Buff)/(Debuff) labels + unit-aware wording, sourced from LIVE frames so it only lists trackable spells.
+  Also **corrected the core premise**: "GloomsAuras never reads aura data" was too strict — the real rule is
+  "no arithmetic/compare on a secret." Reading aura PRESENCE (`auraInstanceID` existence) + DURATION (duration
+  objects), unit from `selfAura`, is sanctioned + verified (API-NOTES §9, CLAUDE.md nuance note). **Do NOT
+  re-apologize for it.** OPEN: instance/raid verification, Deathblow/proc tracking, exact charge count (see
+  START HERE). All committed + pushed. No open bugs.
 - **Session end 2026-07-07 (third session):** shipped **Groups Phase 1** (group data + `CDM:GroupGate`
   engine, skinned name dialog) AND **Phase 2** (grouped/collapsible left pane with custom triangle +
   settings-gear icons, gear→Manage Group drawer for rename/rule/on-off/reorder/delete, group settings
