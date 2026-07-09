@@ -36,6 +36,7 @@ CDM.buffActive     = {} -- spellID -> bool (buff up?), mirrored from item:IsActi
 CDM.lastShown      = {} -- display spellID -> bool (was it shown last refresh?) for sound edges
 CDM.isCharge       = {} -- spellID -> bool (MULTI-charge spell: availability unreadable in combat)
 CDM.maxCharges     = {} -- spellID -> maxCharges (cached when readable OOC; persists across Discover)
+CDM.chargeShadow   = {} -- spellID -> hidden shadow Cooldown widget (charge-spell availability, §9.3)
 
 local VIEWER_NAME_BY_CATEGORY = {
   [0] = "EssentialCooldownViewer", [1] = "UtilityCooldownViewer",
@@ -306,6 +307,60 @@ function CDM:SyncCooldowns()
   end
 end
 
+-- --------------------------------------------------------------------------
+-- Charge-spell availability via a hidden "shadow" Cooldown  (API-NOTES §9.3).
+-- The charge COUNT is secret in combat, but "have >=1 charge" is derivable
+-- secret-safely: feed the spell's GCD-stripped cooldown DURATION OBJECT into a
+-- throwaway Cooldown widget (SetCooldownFromDurationObject does NOT throw for an
+-- OBJECT even when the underlying value is secret — verified in combat), then
+-- read the widget's shown-state — shown ⇔ the spell is on its real cooldown ⇔
+-- 0 charges; hidden ⇔ >=1 charge castable. `mainShown` flips exactly at the
+-- 0<->1 charge boundary (= exactly when availability changes), so OnShow/OnHide
+-- give us the transition with no polling. Verified on Aimed Shot 2->1->0->1->2.
+-- --------------------------------------------------------------------------
+function CDM:EnsureChargeShadow(spellID)
+  local cd = self.chargeShadow[spellID]
+  if cd then return cd end
+  cd = CreateFrame("Cooldown", nil, UIParent, "CooldownFrameTemplate")
+  if cd.SetDrawSwipe then cd:SetDrawSwipe(false) end
+  if cd.SetDrawEdge then cd:SetDrawEdge(false) end
+  if cd.SetHideCountdownNumbers then cd:SetHideCountdownNumbers(true) end
+  -- shown => on real cd => 0 charges => unavailable; hidden => >=1 charge castable.
+  cd:HookScript("OnShow", function() CDM.available[spellID] = false; CDM:RefreshDisplays() end)
+  cd:HookScript("OnHide", function() CDM.available[spellID] = true;  CDM:RefreshDisplays() end)
+  self.chargeShadow[spellID] = cd
+  return cd
+end
+
+-- (Re)feed a charge spell's shadow from its current cooldown. GetSpellCooldownDuration
+-- returns a real object only while the spell itself is on cooldown (0 charges) and nil
+-- while a charge is available, so the widget shows/hides to match. `seed` (Discover, out
+-- of combat where reads are stable) also syncs availability straight from IsShown() to
+-- cover the case where no OnShow/OnHide transition fires (e.g. already at full charges).
+function CDM:FeedChargeShadow(spellID, seed)
+  local cd = self.chargeShadow[spellID]
+  if not cd or not (C_Spell and C_Spell.GetSpellCooldownDuration) then return end
+  local ok, dur = pcall(C_Spell.GetSpellCooldownDuration, spellID, true)   -- true = GCD-stripped
+  if not ok then return end
+  if dur ~= nil then
+    if cd.SetCooldownFromDurationObject then pcall(cd.SetCooldownFromDurationObject, cd, dur, true) end
+  elseif cd.SetCooldown then
+    pcall(cd.SetCooldown, cd, 0, 0)    -- no real cd => hide
+  end
+  if seed then
+    local shown
+    if pcall(function() shown = cd:IsShown() end) then
+      self.available[spellID] = not (shown and true or false)
+    end
+  end
+end
+
+function CDM:FeedAllChargeShadows()
+  for spellID in pairs(self.chargeShadow) do
+    if self.isCharge[spellID] then self:FeedChargeShadow(spellID) end
+  end
+end
+
 -- Re-evaluate every display and show/hide it. Sound fires on a hidden->shown
 -- edge unless `silent` (used for the initial sync so a reload doesn't blast sound).
 function CDM:RefreshDisplays(silent)
@@ -460,12 +515,16 @@ function CDM:Discover()
           self.isCharge[spellID] = charge
 
           if charge then
-            -- MULTI-charge spells (Aimed Shot): "have >=1 charge" is SECRET in combat
-            -- (GetSpellCharges + GetSpellCastCount are both SecretWhenCooldownsRestricted;
-            -- IsSpellUsable ignores charges). No readable signal → leave availability
-            -- UNKNOWN so a cd_ready condition on a charge spell won't falsely fire.
-            -- (Proc detection via C_SpellActivationOverlay is the only partial signal.)
+            -- MULTI-charge spells (Aimed Shot): the charge COUNT is secret in combat
+            -- (GetSpellCharges/GetSpellCastCount are SecretWhenCooldownsRestricted; IsSpellUsable
+            -- ignores charges), BUT availability ("have >=1 charge") is readable via a hidden
+            -- shadow Cooldown fed the GCD-stripped cooldown duration object (API-NOTES §9.3,
+            -- verified on Aimed Shot). Default UNKNOWN, then let the shadow derive + seed it.
             self.available[spellID] = nil
+            if C_Spell and C_Spell.GetSpellCooldownDuration then
+              self:EnsureChargeShadow(spellID)
+              self:FeedChargeShadow(spellID, true)   -- feed + seed availability from IsShown()
+            end
           else
             -- Single-cooldown spells (Rapid Fire): mirror Blizzard's cooldown transitions.
             local cdFrame = frame.GetCooldownFrame and frame:GetCooldownFrame()
@@ -583,9 +642,11 @@ function CDM:Init()
   end
   ev:SetScript("OnEvent", function(_, event)
     if event == "SPELL_UPDATE_COOLDOWN" then
+      CDM:FeedAllChargeShadows()   -- re-feed charge shadows → OnShow/OnHide track availability
       CDM:RefreshDisplays()
     elseif event == "PLAYER_REGEN_ENABLED" then
       CDM:SeedAvailability()
+      CDM:FeedAllChargeShadows()
       CDM:RefreshDisplays()
     else
       CDM:HookViewers()
@@ -909,6 +970,14 @@ function CDM:Probe(filter)
       ForEachItem(viewer, function(frame)
         k = k + 1
         local info; pcall(function() info = frame.GetCooldownInfo and frame:GetCooldownInfo() end)
+        -- Fallback: some cooldown items returned nil GetCooldownInfo (seen OOC on the Warlock).
+        -- The registry lookup by cooldownID is reliable, so recover the struct that way.
+        if not info and frame.GetCooldownID and C_CooldownViewer and C_CooldownViewer.GetCooldownViewerCooldownInfo then
+          pcall(function()
+            local cid = frame:GetCooldownID()
+            if cid ~= nil and not issecret(cid) then info = C_CooldownViewer.GetCooldownViewerCooldownInfo(cid) end
+          end)
+        end
         local sid = info and info.spellID
         local name = "?"
         if sid and not issecret(sid) and type(sid) == "number" and C_Spell and C_Spell.GetSpellName then
@@ -981,6 +1050,15 @@ function CDM:Probe(filter)
             if d2 and fchg.SetCooldownFromDurationObject then fchg:SetCooldownFromDurationObject(d2, true) end
           end)
           local nm = name
+          -- Ground-truth (secret in combat, readable OOC) to correlate with the shadow map.
+          pcall(function()
+            local ci = CS.GetSpellCharges and CS.GetSpellCharges(sid)
+            if ci then
+              emit(("     charges: current=%s max=%s | IsSpellUsable=%s (the TRAP — ignores charges)"):format(
+                pval(ci.currentCharges), pval(ci.maxCharges),
+                pval(CS.IsSpellUsable and CS.IsSpellUsable(sid))))
+            end
+          end)
           C_Timer.After(0.1, function()
             local ms, cs2 = "?", "?"
             pcall(function() ms = tostring(fmain:IsShown()) end)
