@@ -770,22 +770,37 @@ end
 function C:AddBar(arg)
   local db = DB()
   if not db then GA.msg("no active profile yet — open the panel first."); return end
-  local sid = tonumber(arg and tostring(arg):match("%d+"))
+  -- Parse: "[stacks] <spellID> [max]".  No keyword ⇒ aura_dur (a duration timer).
+  local tokens = {}
+  for t in tostring(arg or ""):gmatch("%S+") do tokens[#tokens + 1] = t end
+  local mode, sidTok, maxTok = "aura_dur", tokens[1], nil
+  if tokens[1] == "stacks" then mode, sidTok, maxTok = "stacks", tokens[2], tokens[3] end
+  local sid = tonumber(sidTok and sidTok:match("%d+"))
   if not sid then
-    GA.msg("usage: |cffffd200/ga bar <spellID>|r — e.g. a DoT in your Cooldown Manager Tracked Bars.")
+    GA.msg("usage: |cffffd200/ga bar <spellID>|r (duration)  •  |cffffd200/ga bar stacks <spellID> [max]|r (stack count)")
     return
   end
   local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(sid)) or ("Bar " .. sid)
+  local barcfg = { mode = mode }
+  if mode == "stacks" then
+    barcfg.max = tonumber(maxTok and maxTok:match("%d+")) or 10
+    barcfg.showValue = true                          -- show the live count number on the bar
+  end
   local id = NewDisplayID()
   db[id] = {
     kind = "bar", spellID = sid, label = nm, enabled = true,
     width = 220, height = 24, point = { "CENTER", 0, -120 }, alpha = 1, showLabel = true,
-    bar = { mode = "aura_dur" },
+    bar = barcfg,
   }
   if GA.CDM then GA.CDM:Discover() end
   if panel then SetSelected(id) end
-  GA.msg(("created a Bar for |cffffd200%s|r (%d). It shows while that aura is on you/your target and drains with its duration. Move it with the panel or |cffffd200/ga pos %s x y|r.")
-    :format(tostring(nm), sid, id))
+  if mode == "stacks" then
+    GA.msg(("created a STACKS Bar for |cffffd200%s|r (%d, max %d). It fills with the aura's stack count. Move it with the panel or |cffffd200/ga pos %s x y|r.")
+      :format(tostring(nm), sid, barcfg.max, id))
+  else
+    GA.msg(("created a Bar for |cffffd200%s|r (%d). It shows while that aura is on you/your target and drains with its duration. Move it with the panel or |cffffd200/ga pos %s x y|r.")
+      :format(tostring(nm), sid, id))
+  end
 end
 
 -- --------------------------------------------------------------------------

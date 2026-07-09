@@ -489,12 +489,16 @@ PROFILE = { displays = { [id]=<AURA_CFG> }, groups = { [gid]=<GROUP> }, seq, gro
     color={r,g,b}|nil },   -- LibCustomGlow effect; active while the frame is shown
   kind = "texture"(default/nil) | "bar",   -- display KIND (since 2026-07-09). nil/"texture" = the icon
                                            -- display (all existing displays); "bar" = a StatusBar.
-  bar = { mode="aura_dur"(|"cd_dur"|"stacks" later), texture=<LSM statusbar name|nil=white fill>,
+  bar = { mode="aura_dur"|"stacks"(|"cd_dur" later), texture=<LSM statusbar name|nil=white fill>,
     color={r,g,b}|nil(=orange), bg={r,g,b,a}|nil, orientation="HORIZONTAL"(default)|"VERTICAL",
-    reverse=bool|nil, fill="fill"|nil(=drain), unit="player"|"target"|nil(=auto from selfAura) } }
+    reverse=bool|nil, fill="fill"|nil(=drain), unit="player"|"target"|nil(=auto-resolve),
+    max=N|nil(stacks: bar span, default 10), showValue=bool|nil(stacks: overlay the count number) } }
     -- Bar rendering + source config. The bar's SOURCE spell = cfg.spellID (NOT cfg.bar.spellID — that
     -- design-doc field was dropped: cfg.spellID is the single source of truth, so show/hide reuses the
-    -- normal auto-path). aura_dur feeds the source aura's duration OBJECT to SetTimerDuration.
+    -- normal auto-path). aura_dur feeds the source aura's duration OBJECT to SetTimerDuration; stacks
+    -- feeds the aura's (secret-in-combat) `applications` to SetValue + SetText. UNIT is auto-resolved
+    -- (CDM:ResolveAuraUnit): selfAura is a hint, but if the aura isn't on that unit while the item's
+    -- auraInstanceID is present it flips to the other unit — auto-corrects selfAura LIARS (Freezing).
 ```
 `GA.db.groups[<groupID>] = { id, name, order, enabled (false=off), collapsed (bool),
 visibility = <same shape as an aura's visibility> or nil }` and `GA.db.groupSeq` (the "gN"
@@ -624,7 +628,22 @@ StatusBar. Three modes: **Aura Duration** (DONE), **Cooldown Duration**, **Stack
     reappears at the right fill on target-back (**no catch-up slide**); refresh mid-duration grows it; **pandemic
     recast extends correctly** (the durObj reflects the 130% cap on its own). **KNOWN (deferred, Jason's call):** the
     reappear on swap-BACK still lags ~0.5s — the CDM's own target-rescan latency (same as the DoT-texture reappear-lag).
-  - **NOT committed yet? — check `git log`.** (If this note is in the tree, the slice is committed.)
+- ✅ **QA'd 2026-07-09 (seventh session) — Bar Stacks mode (slice 2).** A `cfg.bar.mode="stacks"` bar fills with an
+  aura's **`applications`** count + shows the number. Secret-safe by the OTHER half of the design: `applications` is
+  **PLAIN out of combat / SECRET in combat** (probe-confirmed), so we feed it straight to `StatusBar:SetValue`
+  (fill) + `FontString:SetText` (the number) — **both `AllowedWhenTainted`** (verified in client source), so they
+  render a secret without us ever operating on it. **Smarter unit resolution (`CDM:ResolveAuraUnit`) — handles the
+  Freezing/selfAura-LIE:** Freezing (Shatter 1246769, `cat=2`, `selfAura=true`) actually lives on the **TARGET**
+  (probe: `player[absent] target[PRESENT:Freezing]`); the resolver trusts selfAura as a hint but, if the aura isn't
+  on that unit while the item's `auraInstanceID` is present, flips to the other unit — auto-correcting the lie
+  without a blind "try both" (§9.1 false-positive risk). This also upgraded aura_dur's resolver for free. Reads via
+  a shared `CDM:BarSource(cfg)` → (unit, aiid); `BarStackValue` reads `applications` (pcall-guarded). Show/hide reuses
+  the aura-present auto-path. Value text = its own centred FontString on the bar (`bar.valueText`; `SetText(secret)`
+  in combat, `tostring` OOC). Back-door: **`/ga bar stacks <spellID> [max]`**. **QA'd on Frost Mage Freezing 1246769
+  (max 20):** bar filled/emptied with the stack count, number tracked (incl. Ice Lance consuming 6), followed target
+  swaps; only the usual ~0.5s swap lag. **Deferred:** segments (N sub-bars) — smooth fill only for now.
+  - **Also fixed:** `Displays.lua` now defines `local issecret = _G.issecretvalue or …` (the bare `issecret` at the old
+    UpdateCooldown line was an undefined global silently swallowed by its pcall — now the secret guard actually works).
 
 **▶ NEXT on bars (pick up here):**
 1. **Type-aware editor (slice 1b)** — a "Type: Texture | Bar" switch at the top of the editor that branches the
@@ -633,12 +652,15 @@ StatusBar. Three modes: **Aura Duration** (DONE), **Cooldown Duration**, **Stack
    today's controls. This is the **first UI-declutter step** ([[avoid-ui-bloat]]) — RECONCILE with Jason's Figma
    design (tokens in the style-guide artifact) before over-building. Watch Config.lua caps (chunk **184/200**;
    `Build` ~56/60 — put new state/functions on the `C` table).
-2. **Stacks mode** — `applications` feed (PLAIN OOC / SECRET in combat; the widget renders the secret via
-   `SetValue`, confirmed by the API annotations) + segments + count text. QA on **Frost Mage Freezing (1246769)**.
-   NOTE the Freezing/selfAura-lies unit case (§-stacks) — a `cfg.bar.unit` override already exists in the resolver.
+2. ~~**Stacks mode**~~ ✅ DONE + QA'd (see above). Remaining polish: **segments** (N sub-bars, ArcUI "perStack")
+   for a Freezing-style segmented look — deferred; smooth fill ships today.
 3. **Cooldown-Duration mode** — feed `C_Spell.GetSpellCooldownDuration(id,true)` (same object the charge shadow uses).
-4. **Value-text / countdown number** — a hidden Cooldown widget with `SetHideCountdownNumbers(false)` fed the same
-   durObj is the proposed secret-safe ticking number (BARS-DESIGN.md verify-item #3) — PROTOTYPE it; bar-only is fine v1.
+   Wrinkle: show/hide must **invert** the cooldown auto-path — a cd bar shows WHILE the spell is on cooldown
+   (draining), hides when ready. Cleanest = drive show off "the cd duration object is non-nil" (object while on cd,
+   nil when ready — same behaviour the charge shadow relies on). Scope v1 to NON-charge cooldowns. Testable on any char.
+4. **Value-text / countdown number for DURATION bars** — stacks already shows its number; a duration COUNTDOWN
+   number is still open. A hidden Cooldown widget with `SetHideCountdownNumbers(false)` fed the same durObj is the
+   proposed secret-safe ticking number (BARS-DESIGN.md verify-item #3) — PROTOTYPE it; bar-only is fine.
 
 - **Parallel track — UI reorg in Figma.** Jason is mocking up a redesigned UI in Figma (the addon is getting
   bloated; see [[avoid-ui-bloat]] memory). Design tokens were handed off as a **style-guide artifact**:

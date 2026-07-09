@@ -354,21 +354,58 @@ end
 -- native auraInstanceID off its CDM item frame (§9.1) and its unit from selfAura.
 -- --------------------------------------------------------------------------
 
--- Resolve the live duration object for a bar display's source aura, or nil.
-function CDM:BarDurationObject(cfg)
+-- Which unit a bar's source aura is actually on. An explicit cfg.bar.unit override wins; else
+-- start from the selfAura-derived unit — but selfAura LIES for some auras (Freezing/Shatter is
+-- selfAura=true yet the debuff sits on the TARGET, verified probe: player[absent] target[PRESENT]).
+-- So: if the aura resolves on the selfAura unit, use it; else — since the item's auraInstanceID IS
+-- present somewhere (frame says so) — it must be on the OTHER unit. This auto-corrects the lie
+-- without a blind "try both" (which §9.1 warns can false-positive on the wrong unit).
+function CDM:ResolveAuraUnit(cfg, sid, aiid)
+  local override = cfg.bar and cfg.bar.unit
+  if override then return override end
+  local primary = self.auraUnit[sid] or "target"
+  if UnitExists(primary) and isPresent(aiid) then
+    local ok, data = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, primary, aiid)
+    if ok and data ~= nil then return primary end
+  end
+  return (primary == "player") and "target" or "player"
+end
+
+-- Find a bar's source aura on its CDM item frame → returns (unit, auraInstanceID) or nil.
+-- Shared by every aura-reading bar mode (aura_dur duration, stacks count).
+function CDM:BarSource(cfg)
   local sid = cfg and cfg.spellID
   if not sid then return nil end
-  -- Unit: an explicit cfg.bar.unit override wins; else the selfAura-derived unit captured at
-  -- Discover. (The Freezing/selfAura-lies case — API-NOTES §-stacks — is a Stacks-mode concern;
-  -- for aura_dur DoTs selfAura is correct, and the override covers the exceptions.)
-  local unit = (cfg.bar and cfg.bar.unit) or self.auraUnit[sid]
   for frame, fsid in pairs(self.frameToSpell) do
     if fsid == sid and self.frameKind[frame] == "buff" then
-      local durObj = GetAuraDurationObject(unit, frame.auraInstanceID)
-      if durObj then return durObj end
+      local aiid = frame.auraInstanceID
+      if isPresent(aiid) then
+        return self:ResolveAuraUnit(cfg, sid, aiid), aiid
+      end
     end
   end
   return nil
+end
+
+-- The live duration object for a bar's source aura (aura_dur mode), or nil.
+function CDM:BarDurationObject(cfg)
+  local unit, aiid = self:BarSource(cfg)
+  if not unit then return nil end
+  return GetAuraDurationObject(unit, aiid)
+end
+
+-- The source aura's stack count (stacks mode). May be a SECRET number in combat — we NEVER
+-- operate on it, just return it for the caller to hand to StatusBar:SetValue / FontString:SetText
+-- (both AllowedWhenTainted, so they render a secret). PLAIN out of combat. nil if unresolved.
+function CDM:BarStackValue(cfg)
+  local unit, aiid = self:BarSource(cfg)
+  if not unit or not UnitExists(unit) then return nil end
+  local val
+  pcall(function()
+    local data = C_UnitAuras.GetAuraDataByAuraInstanceID(unit, aiid)
+    if data ~= nil and not issecret(data) then val = data.applications end
+  end)
+  return val
 end
 
 -- Re-feed every SHOWN bar's duration object. Called on UNIT_AURA (catches DoT refresh/extension)

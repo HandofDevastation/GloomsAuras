@@ -99,8 +99,13 @@ reconcile with his design.
    on Warlock Agony (drain, expiry, target-swap, refresh, pandemic). Back-door: `/ga bar <spellID>`.
    Value-text countdown NOT built (deferred to a value-text pass — see verify-item #3). **NOTE the
    deviation: source spell = `cfg.spellID`, not `cfg.bar.spellID`.**
-2. **Stacks mode** — `applications` feed (secret-safe), segments, count text. **QA on Frost Mage Freezing.**
-3. **Cooldown-Duration mode** — cd-duration feed. **QA on any cooldown.**
+2. ✅ **DONE + QA'd 2026-07-09 — Stacks mode** — `applications` → SetValue + SetText (both AllowedWhenTainted →
+   render the secret count in combat); smarter unit resolver (`CDM:ResolveAuraUnit`) auto-corrects the
+   Freezing/selfAura lie (selfAura=true but debuff on target). Count number shown; **segments deferred**. Back-door
+   `/ga bar stacks <spellID> [max]`. Verified on Frost Mage Freezing 1246769 (fill/empty per stack, count tracks,
+   follows target).
+3. **Cooldown-Duration mode** — cd-duration feed. **QA on any cooldown.** (Show/hide inverts the cd auto-path — show
+   WHILE on cooldown; drive off "cd duration object non-nil". Scope v1 to non-charge cooldowns.)
 Plus a **type-aware editor** (Texture|Bar switch) — reconcile with Jason's Figma. Each pass ships + QAs on its own.
 
 ## Reference code to REUSE (so this is pick-up-and-go, not a re-investigation)

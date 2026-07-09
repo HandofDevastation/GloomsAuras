@@ -13,6 +13,8 @@
 local ADDON_NAME = ...
 local GA = _G.GloomsAuras
 
+local issecret = _G.issecretvalue or function() return false end
+
 local D = {}
 GA.Displays = D
 
@@ -191,6 +193,12 @@ local function EnsureBar(f)
   local bg = bar:CreateTexture(nil, "BACKGROUND")
   bg:SetAllPoints(bar)
   bar.bg = bg
+  -- Value text (stacks count). Its own FontString (NOT the shared name label) centred on the bar;
+  -- fed the raw applications via SetText, which accepts a SECRET value (renders it in combat).
+  local vt = bar:CreateFontString(nil, "OVERLAY")
+  vt:SetPoint("CENTER", bar, "CENTER", 0, 0)
+  vt:Hide()
+  bar.valueText = vt
   f.bar = bar
   return bar
 end
@@ -212,9 +220,30 @@ function D:ApplyBarStyle(f, cfg)
   bar:SetStatusBarColor(col[1] or 1, col[2] or 1, col[3] or 1)
   local bgc = b.bg or { 0, 0, 0, 0.55 }
   bar.bg:SetColorTexture(bgc[1] or 0, bgc[2] or 0, bgc[3] or 0, bgc[4] or 0.55)
-  bar:SetMinMaxValues(0, 1)
-  bar:SetValue(1)                 -- full until a duration object is fed (CDM:UpdateBar)
-  bar.__needSnap = true           -- first real feed snaps to actual remaining (handles /reload mid-fight)
+  -- Initial state depends on mode: a stacks bar spans 0..max and starts empty; a duration bar
+  -- spans 0..1 and starts full — both are corrected by the first CDM:UpdateBar feed.
+  if b.mode == "stacks" then
+    bar:SetMinMaxValues(0, b.max or 10)
+    bar:SetValue(0)
+  else
+    bar:SetMinMaxValues(0, 1)
+    bar:SetValue(1)
+  end
+  bar.__needSnap = true            -- first duration feed snaps to actual remaining (/reload mid-fight)
+  -- Value text (stacks count) — its own font, shown only when the bar asks for it.
+  local vt = bar.valueText
+  if vt then
+    if b.showValue then
+      local font = (GA.FONT and GA.FONT.body) or (STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF")
+      if not vt:SetFont(font, b.valueSize or 14, "OUTLINE") then
+        vt:SetFont(STANDARD_TEXT_FONT or "Fonts\\FRIZQT__.TTF", b.valueSize or 14, "OUTLINE")
+      end
+      vt:SetTextColor(1, 1, 1)
+      vt:Show()
+    else
+      vt:Hide()
+    end
+  end
   bar:SetAlpha(cfg.alpha or 1)
   bar:Show()
 end
@@ -225,11 +254,32 @@ end
 function D:UpdateBar(spellID)
   local f = self.frames[spellID]; if not f or not f.bar then return end
   local cfg = self:Config(spellID); if not cfg or cfg.kind ~= "bar" then return end
-  if not (GA.CDM and GA.CDM.BarDurationObject) then return end
+  if not GA.CDM then return end
+  local b = cfg.bar or {}
+
+  if b.mode == "stacks" then
+    -- Stacks: feed the (possibly SECRET) applications count straight to SetValue + SetText.
+    -- We never operate on it; both sinks are AllowedWhenTainted so they render a secret in combat.
+    if not GA.CDM.BarStackValue then return end
+    local v = GA.CDM:BarStackValue(cfg)
+    if v == nil then return end
+    pcall(function()
+      f.bar:SetMinMaxValues(0, b.max or 10)
+      f.bar:SetValue(v)
+      local vt = f.bar.valueText
+      if vt and b.showValue then
+        if issecret(v) then vt:SetText(v)              -- SetText accepts the secret directly
+        else vt:SetText(tostring(v)) end               -- plain (out of combat)
+      end
+    end)
+    return
+  end
+
+  -- Default: aura_dur — feed the source aura's duration OBJECT so the bar self-drains.
+  if not GA.CDM.BarDurationObject then return end
   local durObj = GA.CDM:BarDurationObject(cfg)
   if not durObj then return end
   if not (Enum and Enum.StatusBarInterpolation and Enum.StatusBarTimerDirection and f.bar.SetTimerDuration) then return end
-  local b = cfg.bar or {}
   local dir = (b.fill == "fill") and Enum.StatusBarTimerDirection.ElapsedTime
                                  or  Enum.StatusBarTimerDirection.RemainingTime
   -- Snap (Immediate) on the first feed after a (re)show so a stale fill doesn't visibly catch up;
