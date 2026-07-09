@@ -79,18 +79,21 @@ local STRATA_MODES = {
 -- native Blizzard art / unicode triangles (game fonts lack ▼/▶ → tofu boxes).
 local CARET_DOWN = -math.pi / 2   -- rotate a right-pointing source to point down (expanded)
 
-local STATE_ORDER = { "buff_active", "buff_inactive", "cd_ready", "cd_oncd" }
+local STATE_ORDER = { "buff_active", "buff_inactive", "cd_ready", "cd_oncd", "charges_max", "charges_notmax" }
 local STATE_LABEL = {
-  buff_active   = "buff is active",
-  buff_inactive = "buff is NOT active",
-  cd_ready      = "cooldown is ready",
-  cd_oncd       = "cooldown is NOT ready",
+  buff_active    = "buff is active",
+  buff_inactive  = "buff is NOT active",
+  cd_ready       = "cooldown is ready",
+  cd_oncd        = "cooldown is NOT ready",
+  charges_max    = "at max charges",
+  charges_notmax = "NOT at max charges",
 }
 -- Word a condition's state per the leaf's kind: cooldowns stay "cooldown …"; an aura's two
 -- buff states become buff (on you) / debuff (on target) / proc, from the picked entry's kind
 -- (selfAura + hasAura). Keeps the picker tags and the condition wording aligned.
 local function StateLabel(state, k)
-  if state == "cd_ready" or state == "cd_oncd" then return STATE_LABEL[state] or "?" end
+  if state == "cd_ready" or state == "cd_oncd"
+     or state == "charges_max" or state == "charges_notmax" then return STATE_LABEL[state] or "?" end
   local active = (state == "buff_active")
   if k == "proc" then
     return active and "proc is active" or "proc is NOT active"
@@ -1462,12 +1465,23 @@ function C:TrigRemove(ti, ci)
 end
 function C:TrigCycleState(ti, ci)
   local leaf = self:TrigNode(ti, ci); if not leaf or not leaf.state then return end
-  -- Toggle within the leaf's own family: an aura condition flips active<->inactive, a cooldown
-  -- condition flips ready<->on-cd — instead of rotating through all four (which let a debuff
-  -- become a nonsensical "cooldown ready"). Kind is inferred from the current state.
-  local isCd = (leaf.state == "cd_ready" or leaf.state == "cd_oncd")
-  local a, b = (isCd and "cd_ready" or "buff_active"), (isCd and "cd_oncd" or "buff_inactive")
-  leaf.state = (leaf.state == a) and b or a
+  -- Cycle within the leaf's own FAMILY (never let a debuff become a nonsensical "cooldown ready"):
+  --  • aura     → active <-> inactive
+  --  • cooldown → ready <-> on-cd, and for a CHARGE spell also at-max <-> not-at-max charges
+  --    (the charge states are only reachable on a spell that actually uses charges).
+  local cdStates = (leaf.state == "cd_ready" or leaf.state == "cd_oncd"
+                    or leaf.state == "charges_max" or leaf.state == "charges_notmax")
+  local list
+  if cdStates then
+    local isCharge = GA.CDM and GA.CDM.isCharge and GA.CDM.isCharge[leaf.spellID]
+    list = isCharge and { "cd_ready", "cd_oncd", "charges_max", "charges_notmax" }
+                     or { "cd_ready", "cd_oncd" }
+  else
+    list = { "buff_active", "buff_inactive" }
+  end
+  local idx = 1
+  for i, s in ipairs(list) do if s == leaf.state then idx = i; break end end
+  leaf.state = list[(idx % #list) + 1]   -- advance, wrapping
   if GA.CDM then GA.CDM:RefreshDisplays() end
   self:TrigRender()
 end

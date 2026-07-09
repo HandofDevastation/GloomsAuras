@@ -37,6 +37,8 @@ CDM.lastShown      = {} -- display spellID -> bool (was it shown last refresh?) 
 CDM.isCharge       = {} -- spellID -> bool (MULTI-charge spell: availability unreadable in combat)
 CDM.maxCharges     = {} -- spellID -> maxCharges (cached when readable OOC; persists across Discover)
 CDM.chargeShadow   = {} -- spellID -> hidden shadow Cooldown widget (charge-spell availability, §9.3)
+CDM.chargeRecharge = {} -- spellID -> 2nd shadow fed the RECHARGE timer: shown while recharging, hidden AT MAX
+CDM.chargesFull    = {} -- spellID -> bool (AT MAX charges? = recharge shadow hidden); nil = unknown
 
 local VIEWER_NAME_BY_CATEGORY = {
   [0] = "EssentialCooldownViewer", [1] = "UtilityCooldownViewer",
@@ -156,6 +158,10 @@ function CDM:EvalCondition(cond)
     return a == true
   elseif state == "cd_oncd" then
     return self.available[sid] == false    -- unknown (nil, untracked) = NOT confirmed on-cd
+  elseif state == "charges_max" then
+    return self.chargesFull[sid] == true   -- at MAX charges (recharge shadow hidden); unknown = false
+  elseif state == "charges_notmax" then
+    return self.chargesFull[sid] == false  -- spent >=1 charge / recharging; unknown = false
   end
   return false
 end
@@ -318,17 +324,31 @@ end
 -- 0<->1 charge boundary (= exactly when availability changes), so OnShow/OnHide
 -- give us the transition with no polling. Verified on Aimed Shot 2->1->0->1->2.
 -- --------------------------------------------------------------------------
-function CDM:EnsureChargeShadow(spellID)
-  local cd = self.chargeShadow[spellID]
-  if cd then return cd end
-  cd = CreateFrame("Cooldown", nil, UIParent, "CooldownFrameTemplate")
+local function mkShadowCooldown()
+  local cd = CreateFrame("Cooldown", nil, UIParent, "CooldownFrameTemplate")
   if cd.SetDrawSwipe then cd:SetDrawSwipe(false) end
   if cd.SetDrawEdge then cd:SetDrawEdge(false) end
   if cd.SetHideCountdownNumbers then cd:SetHideCountdownNumbers(true) end
+  return cd
+end
+
+function CDM:EnsureChargeShadow(spellID)
+  local cd = self.chargeShadow[spellID]
+  if cd then return cd end
+  -- Shadow A (availability): fed the REAL cooldown duration — present only at 0 charges.
   -- shown => on real cd => 0 charges => unavailable; hidden => >=1 charge castable.
+  cd = mkShadowCooldown()
   cd:HookScript("OnShow", function() CDM.available[spellID] = false; CDM:RefreshDisplays() end)
   cd:HookScript("OnHide", function() CDM.available[spellID] = true;  CDM:RefreshDisplays() end)
   self.chargeShadow[spellID] = cd
+  -- Shadow B (fullness): fed the RECHARGE duration — present while recharging, absent AT MAX.
+  -- shown => recharging => NOT at max; hidden => at max charges. Together with Shadow A this
+  -- reads out the count: max = {A hidden, B hidden}; partial = {A hidden, B shown}; 0 =
+  -- {A shown, B shown}. Exact for 2-charge spells; full/partial/empty buckets for 3+.
+  local rc = mkShadowCooldown()
+  rc:HookScript("OnShow", function() CDM.chargesFull[spellID] = false; CDM:RefreshDisplays() end)
+  rc:HookScript("OnHide", function() CDM.chargesFull[spellID] = true;  CDM:RefreshDisplays() end)
+  self.chargeRecharge[spellID] = rc
   return cd
 end
 
@@ -337,22 +357,48 @@ end
 -- while a charge is available, so the widget shows/hides to match. `seed` (Discover, out
 -- of combat where reads are stable) also syncs availability straight from IsShown() to
 -- cover the case where no OnShow/OnHide transition fires (e.g. already at full charges).
-function CDM:FeedChargeShadow(spellID, seed)
-  local cd = self.chargeShadow[spellID]
-  if not cd or not (C_Spell and C_Spell.GetSpellCooldownDuration) then return end
-  local ok, dur = pcall(C_Spell.GetSpellCooldownDuration, spellID, true)   -- true = GCD-stripped
+-- Feed one shadow widget from a duration function; on `seed`, also read IsShown() straight
+-- into `store[spellID]` (true when the widget is HIDDEN — the "good" end for both signals:
+-- available = cd not shown, atMax = recharge not shown).
+local function feedShadow(cd, durFn, spellID, seed, store)
+  if not cd or not durFn then return end
+  local ok, dur = pcall(durFn, spellID, true)   -- true = GCD-stripped
   if not ok then return end
   if dur ~= nil then
     if cd.SetCooldownFromDurationObject then pcall(cd.SetCooldownFromDurationObject, cd, dur, true) end
   elseif cd.SetCooldown then
-    pcall(cd.SetCooldown, cd, 0, 0)    -- no real cd => hide
+    pcall(cd.SetCooldown, cd, 0, 0)    -- no duration => hide
   end
-  if seed then
+  if seed and store then
     local shown
     if pcall(function() shown = cd:IsShown() end) then
-      self.available[spellID] = not (shown and true or false)
+      store[spellID] = not (shown and true or false)
     end
   end
+end
+
+function CDM:FeedChargeShadow(spellID, seed)
+  local CS = C_Spell
+  if not CS then return end
+  -- Shadow A ← real cooldown (present at 0 charges) → availability (>=1 charge).
+  feedShadow(self.chargeShadow[spellID],   CS.GetSpellCooldownDuration, spellID, seed, self.available)
+  -- Shadow B ← recharge timer (present while recharging) → fullness (at max charges).
+  feedShadow(self.chargeRecharge[spellID], CS.GetSpellChargeDuration,   spellID, seed, self.chargesFull)
+end
+
+-- Exact charge count when secret-safely derivable: the endpoints (max / 0) are always known;
+-- the partial middle is exact only for 2-charge spells. Returns a number, or nil when unknown
+-- (untracked, or a 3+ charge spell mid-recharge). Drives the Pass-2 count text overlay.
+function CDM:ChargeCount(spellID)
+  if not self.isCharge[spellID] then return nil end
+  local avail, full = self.available[spellID], self.chargesFull[spellID]
+  if full == true then return self.maxCharges[spellID] end   -- at max
+  if avail == false then return 0 end                        -- depleted
+  if avail == true and full == false then                    -- partial (>=1, <max)
+    if self.maxCharges[spellID] == 2 then return 1 end
+    return nil                                               -- 3+ charge: exact middle unreadable
+  end
+  return nil
 end
 
 function CDM:FeedAllChargeShadows()
@@ -555,6 +601,34 @@ function CDM:Discover()
 
         if GA.Displays then GA.Displays:SetCooldownEnabled(spellID, false) end
       end)
+    end
+  end
+
+  -- Frame-independent fallback for CHARGE cooldowns whose Essential item frame is HIDDEN while
+  -- idle (`hideWhenInactive` clears the frame's cooldownID → GetCooldownInfo returns nil → the
+  -- loop above can't match it → the spell never gets classified). A charge spell's availability
+  -- AND fullness come from the shadow widgets (spell-API-fed, NOT the frame), so we can classify
+  -- it directly from GetSpellCharges. Without this, an idle-out-of-combat Aimed Shot has no
+  -- isCharge/shadow → its charge trigger states + count don't work until its frame happens to show.
+  -- (maxCharges is secret in combat but persists cached from any prior out-of-combat read.)
+  for spellID in pairs(watch) do
+    if self.kind[spellID] == nil and not self.isCharge[spellID] then
+      local mx = self.maxCharges[spellID]
+      if not mx then
+        pcall(function()
+          local ci = C_Spell and C_Spell.GetSpellCharges and C_Spell.GetSpellCharges(spellID)
+          if ci and not issecret(ci.maxCharges) and ci.maxCharges then mx = ci.maxCharges; self.maxCharges[spellID] = mx end
+        end)
+      end
+      if mx and mx >= 2 then
+        self.kind[spellID] = "cooldown"
+        self.isCharge[spellID] = true
+        self.available[spellID] = nil
+        if C_Spell and C_Spell.GetSpellCooldownDuration then
+          self:EnsureChargeShadow(spellID)
+          self:FeedChargeShadow(spellID, true)   -- feed + seed availability + fullness from IsShown()
+        end
+      end
     end
   end
 
