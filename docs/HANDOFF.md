@@ -595,9 +595,29 @@ one step per QA pass; never declare done before he confirms in-game.**
 - **Phase 3 — Profiles.** ✅ **DONE + QA'd 2026-07-08** (see BUILT list): schema-2 migration + `GA.global`/
   `GA.db` split (`fc41649`), switcher UI (`6deae65`). Feature complete; nothing left open here.
 
-### ▶▶ START HERE NEXT SESSION — BAR DISPLAY TYPE (Aura-Duration slice ✅ SHIPPED + QA'd; do Stacks/CD next)
+### ▶▶ START HERE NEXT SESSION (session 9) — BUILD THE REDESIGNED UI, PIXEL-PERFECT TO FIGMA
 
-**Bar type design: [docs/BARS-DESIGN.md](BARS-DESIGN.md).** A Bar is a display *kind* (`cfg.kind="bar"`) that
+**READ [docs/UI-REDESIGN.md](UI-REDESIGN.md) FIRST — it holds every decision from session 8's long design
+conversation.** Then pull Jason's current Figma selection (the **figma-desktop MCP is now wired**, loads at
+session start — see the doc's "Figma access") and build the new options panel to the pixels. Jason has NEW bar
+mocks ready: **"aura bar (appearance, position & size)"** + **"bar aura type & source."** This is a `Config.lua`
+`Build()` refactor: **landing page → type-specific accordion editor** (one section open at a time). The bar
+ENGINE (all 3 modes) is DONE + shipped; this is a PRESENTATION-layer rebuild — keep every shipped feature intact.
+
+Key locked decisions (full detail in UI-REDESIGN.md): **only TWO bar types — Duration & Stacks** (Cooldown is a
+Duration bar on a different clock). **Duration** needs Track(aura|cooldown) + Direction(drain|fill). **Stacks**
+needs Max + Unit(Auto/Player/Target; auto-detects self-buff vs target-debuff — Freezing proven). **A bar has NO
+multi-trigger builder — its source IS its trigger.** Duration **countdown NUMBER** is feasible-but-UNBUILT;
+stacks **colour-by-fullness** NEEDS A PROBE; **sound-at-stack-level is WALLED** — the UI must not promise the last
+two. The **HTML prototype (artifact `325ae79c`) was REJECTED** ("component dump") — build the real addon UI,
+use-case-first, NOT a control dump. Watch the `Config.lua` caps (chunk **184/200**, `Build` **56/60**): new
+sections = own functions / `C:` methods, not inline `Build` locals.
+
+---
+
+### ✅ DONE — Bar display type (all 3 modes shipped session 8; design [docs/BARS-DESIGN.md](BARS-DESIGN.md))
+
+A Bar is a display *kind* (`cfg.kind="bar"`) that
 reuses the whole pipeline (list/position/trigger/visibility/group/sound) and only swaps *rendering* to a
 StatusBar. Three modes: **Aura Duration** (DONE), **Cooldown Duration**, **Stacks**.
 
@@ -799,6 +819,18 @@ real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears
 - His Warlock (main) character/profile is **"Gloomwick - Stormrage"**; his Hunter is **"Gloomvale - Stormrage"**
   (account folder `AELWYN`; both profiles exist and are correctly populated). After Phase-3 QA he may have
   leftover test profiles (e.g. "Copy Test") — harmless; deletable from the Profiles drawer.
+- **Session end 2026-07-09 (EIGHTH session) — Bar type SHIPPED + UI-redesign design pass. NEXT = build the UI.**
+  (1) **All three Bar modes shipped + QA'd + committed:** Aura-Duration (`6ac6b8a`, Warlock Agony), Stacks
+  (`a55b206`, Frost Mage Freezing — incl. the selfAura-lie unit resolver), Cooldown-Duration (`5581ecc`, Cone of
+  Cold — needed a shadow-Cooldown IsShown() for hide + a bling/sparkle fix on `mkShadowCooldown`). Back-doors:
+  `/ga bar <id>` / `/ga bar cd <id>` / `/ga bar stacks <id> [max]`. (2) **Fixed the Figma MCP:** `figma-desktop`
+  was scoped only to the `hodguild` project in `~/.claude.json`; registered it at USER scope + GloomsAuras (backed
+  up first, atomic write). Now connects each fresh session. (3) **Long UI-redesign DESIGN conversation → [docs/
+  UI-REDESIGN.md](UI-REDESIGN.md)** (landing → type-specific accordion; only TWO bar types; bars have no trigger
+  builder; unit auto-detect; picker can't pre-filter no-duration toggles; countdown-number feasible-unbuilt,
+  stacks colour-by-fullness needs a probe, sound-at-stack-level walled). (4) **HTML prototype built + REJECTED**
+  by Jason as a control-dump (artifact `325ae79c`) — the real addon UI gets built next, pixel-perfect to Figma,
+  use-case-first. Jason has NEW bar mocks ready. **No open bugs. Config.lua 184/200 locals.** All committed; pushing.
 - **Session end 2026-07-09 (sixth session) — verification + a picker regression fix.** (1) **Instance check
   banked** — follower dungeon on Gloomwick (Warlock); DoT tracking works, but the follower dungeon behaved
   identically to open-world combat (auras readable, cooldowns secret-in-combat as always), so it did NOT
