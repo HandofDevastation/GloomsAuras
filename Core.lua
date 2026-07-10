@@ -37,10 +37,15 @@ end
 GA.COLOR = {
   purple = color("936bff"),  -- bright purple — accents, selection, buttons
   heroic = color("8031ff"),  -- deep purple
-  green  = color("20ba56"),  -- confirm / "added" green
-  orange = color("ff7729"),  -- warning / remove
-  dark   = { r = 0.04, g = 0.055, b = 0.10, a = 0.96 },  -- panel base (navy-black)
-  rim    = { r = 1, g = 1, b = 1, a = 0.10 },            -- 1px frame rim
+  green  = color("20ba56"),  -- confirm / "added" green (Group button)
+  red    = color("c41e3a"),  -- destructive / Delete
+  orange = color("ff7729"),  -- warning / accent
+  -- Panel base. TARGET = Figma #060714 (rgb 6,7,20). WoW's SetColorTexture renders ~11/255
+  -- DARKER per channel on this display (measured: input−11 ≈ on-screen), so we pre-add that
+  -- floor: (6,7,20)+~(12,12,11) → #12131F, which lands on #060714 on screen. Re-tune here if
+  -- the eyedrop is still off. (a=1: fully opaque.)
+  dark   = { r = 18/255, g = 19/255, b = 31/255, a = 1 },
+  rim    = { r = 1, g = 1, b = 1, a = 0.10 },            -- 1px divider / rim (white @ 10%)
 }
 
 GA.MEDIA = "Interface\\AddOns\\" .. ADDON_NAME .. "\\Media\\"

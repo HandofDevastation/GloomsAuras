@@ -595,23 +595,23 @@ one step per QA pass; never declare done before he confirms in-game.**
 - **Phase 3 — Profiles.** ✅ **DONE + QA'd 2026-07-08** (see BUILT list): schema-2 migration + `GA.global`/
   `GA.db` split (`fc41649`), switcher UI (`6deae65`). Feature complete; nothing left open here.
 
-### ▶▶ START HERE NEXT SESSION (session 9) — BUILD THE REDESIGNED UI, PIXEL-PERFECT TO FIGMA
+### ▶▶ START HERE (session 10) — CONTINUE THE REDESIGNED UI BUILD (mid-way through)
 
-**READ [docs/UI-REDESIGN.md](UI-REDESIGN.md) FIRST — it holds every decision from session 8's long design
-conversation.** Then pull Jason's current Figma selection (the **figma-desktop MCP is now wired**, loads at
-session start — see the doc's "Figma access") and build the new options panel to the pixels. Jason has NEW bar
-mocks ready: **"aura bar (appearance, position & size)"** + **"bar aura type & source."** This is a `Config.lua`
-`Build()` refactor: **landing page → type-specific accordion editor** (one section open at a time). The bar
-ENGINE (all 3 modes) is DONE + shipped; this is a PRESENTATION-layer rebuild — keep every shipped feature intact.
+**READ [docs/UI-REDESIGN.md](UI-REDESIGN.md) — the "▶▶ BUILD STATUS & ARCHITECTURE" section at the BOTTOM is the
+live pickup point** (control language, panel geometry, Lua caps, the accordion architecture, what's built + QA'd,
+and the exact NEXT steps). The section above it holds the original session-8 design decisions (still valid).
 
-Key locked decisions (full detail in UI-REDESIGN.md): **only TWO bar types — Duration & Stacks** (Cooldown is a
-Duration bar on a different clock). **Duration** needs Track(aura|cooldown) + Direction(drain|fill). **Stacks**
-needs Max + Unit(Auto/Player/Target; auto-detects self-buff vs target-debuff — Freezing proven). **A bar has NO
-multi-trigger builder — its source IS its trigger.** Duration **countdown NUMBER** is feasible-but-UNBUILT;
-stacks **colour-by-fullness** NEEDS A PROBE; **sound-at-stack-level is WALLED** — the UI must not promise the last
-two. The **HTML prototype (artifact `325ae79c`) was REJECTED** ("component dump") — build the real addon UI,
-use-case-first, NOT a control dump. Watch the `Config.lua` caps (chunk **184/200**, `Build` **56/60**): new
-sections = own functions / `C:` methods, not inline `Build` locals.
+**Where we are (session 9, 2026-07-09→10):** the redesign is being built slice-by-slice, **pixel-perfect to Figma,
+QA'd in-game each slice** (Jason is ruthlessly picky — see the pixel-perfect-every-pass memory). DONE + QA'd:
+**Landing/shell**, **Appearance section**, **left-pane buttons**, **Aura Trigger(s)** (flat + nested group),
+**Text**. BUILT pending-QA: **Effects & Motion → Glow** (Motion parked). NEXT: **Sounds**, then **Aura Load
+Conditions** (visibility), a **deferred-polish pass**, then **Slice 4 = the BAR editor** (has real engine-vs-mock
+gaps to resolve with Jason: segments/border/2nd-color + the bar text/countdown features), then **Slice 5 = Texture
+editor**. Full detail + every gotcha is in the UI-REDESIGN build-status section.
+
+Locked bar decisions (unchanged): **only TWO bar types — Duration & Stacks** (Cooldown = a Duration bar on a
+different clock). **A bar has NO multi-trigger builder — its source IS its trigger.** The bar ENGINE (all 3 modes)
+is DONE + shipped (`/ga bar` back-doors work now); Slice 4 is the presentation layer for it.
 
 ---
 
@@ -819,6 +819,20 @@ real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears
 - His Warlock (main) character/profile is **"Gloomwick - Stormrage"**; his Hunter is **"Gloomvale - Stormrage"**
   (account folder `AELWYN`; both profiles exist and are correctly populated). After Phase-3 QA he may have
   leftover test profiles (e.g. "Copy Test") — harmless; deletable from the Profiles drawer.
+- **Session end 2026-07-10 (NINTH session) — UI REDESIGN BUILD, slices 1–3c. Mid-build; details in
+  [docs/UI-REDESIGN.md](UI-REDESIGN.md) "▶▶ BUILD STATUS" (the live pickup point).** Built + QA'd pixel-perfect
+  to Figma: **Landing/shell** (620×740, state machine, footer, `ga_logo_full.png`), **Appearance** section,
+  **left-pane button stack** (New/Duplicate/Delete/Group), **Aura Trigger(s)** (Match segmented + bordered box +
+  nested orange TRIGGER GROUP + shift-click-to-group + per-group "+ Add to Group"), **Text** (Size cap → 300).
+  Built pending-QA: **Effects & Motion → Glow** (Motion parked per Jason). The editor is now an **accordion of
+  `C:` methods** (`C:BuildEditor` + `AccordionAddSection/Toggle/Open/Layout/SetHeight` + per-section builders),
+  which freed `Build` from ~58→35 upvalues; chunk 194/200. Reworked shared controls to the redesign language
+  (`MakeSlider`/`MakeDropdown`/`MakeColor`/`flatCheck` + new `makeToggle`/`twoWeightLabel`). `COLOR.dark` gamma-
+  compensated to `#12131F` (renders as Figma `#060714`); added `COLOR.red`. Assets: `ga_logo_full.png`,
+  `checkmark_white.png` (Jason's); still need a chain-link PNG for the aspect lock. Detour: chased a "bar duration
+  won't drain" bug → RED HERRING (the landing "Add Bar Aura" makes an unconfigured shell; `/ga bar` works). NEXT:
+  Sounds → Load Conditions → deferred polish → **Slice 4 Bar editor** (resolve segments/border/2nd-color +
+  bar-text gaps with Jason) → Texture editor. **No open bugs.** All committed + pushed at session end.
 - **Session end 2026-07-09 (EIGHTH session) — Bar type SHIPPED + UI-redesign design pass. NEXT = build the UI.**
   (1) **All three Bar modes shipped + QA'd + committed:** Aura-Duration (`6ac6b8a`, Warlock Agony), Stacks
   (`a55b206`, Frost Mage Freezing — incl. the selfAura-lie unit resolver), Cooldown-Duration (`5581ecc`, Cone of

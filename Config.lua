@@ -61,12 +61,12 @@ local function DockRight(f)
 end
 
 local listFrame, listRows, listData, listOffset = nil, {}, {}, 0
-local LIST_ROWS = 20   -- leave room for the Add / Duplicate / Remove button stack
+local LIST_ROWS = 15   -- leave room for the New/Duplicate/Delete/Group button stack
 local LIST_ROW_H = 24
 
 -- Texture blend modes (SetBlendMode) + friendly labels; frame strata choices.
 local BLEND_MODES = {
-  { "BLEND", "Blend" }, { "ADD", "Add (glow)" }, { "MOD", "Modulate" },
+  { "BLEND", "Normal" }, { "ADD", "Add (glow)" }, { "MOD", "Modulate" },
 }
 local STRATA_MODES = {
   { "LOW", "Low" }, { "MEDIUM", "Medium" }, { "HIGH", "High" },
@@ -102,6 +102,19 @@ local function StateLabel(state, k)
   else
     return active and "buff is active (on you)" or "buff is NOT active (on you)"
   end
+end
+
+-- Trigger state PILL wording (redesign): a bold main part + a regular "(suffix)".
+-- e.g. buff_active+debuff → "ACTIVE on Target" , " (Debuff)".
+local function TrigPill(state, k)
+  if state == "cd_ready" then return "READY", " (Cooldown)"
+  elseif state == "cd_oncd" then return "ON COOLDOWN", " (Cooldown)"
+  elseif state == "charges_max" then return "AT MAX", " (Charges)"
+  elseif state == "charges_notmax" then return "NOT AT MAX", " (Charges)" end
+  local active = (state == "buff_active")
+  local unit = (k == "debuff") and "Target" or "You"
+  local kind = (k == "debuff") and "Debuff" or (k == "proc") and "Proc" or "Buff"
+  return (active and "ACTIVE on " or "NOT ACTIVE on ") .. unit, " (" .. kind .. ")"
 end
 
 -- --------------------------------------------------------------------------
@@ -158,13 +171,10 @@ local function flatEditBox(parent, w, h)
   return e
 end
 
--- Navy plate + subtle flame texture + 1px rim (the Build Barn look).
+-- Flat dark fill only (Figma: solid rgb(6,7,20), no texture, no border).
 local function skinPlate(f)
   local base = f:CreateTexture(nil, "BACKGROUND")
-  base:SetAllPoints(); base:SetColorTexture(COLOR.dark.r, COLOR.dark.g, COLOR.dark.b, COLOR.dark.a)
-  local flame = f:CreateTexture(nil, "BACKGROUND", nil, 1)
-  flame:SetAllPoints(); flame:SetTexture(MEDIA .. "bg_flame.png"); flame:SetAlpha(0.30)
-  addEdges(f, COLOR.rim, 1)
+  base:SetAllPoints(); base:SetColorTexture(COLOR.dark.r, COLOR.dark.g, COLOR.dark.b, COLOR.dark.a or 1)
 end
 
 -- Flat, alpha-driven button. Opacity is the only state: _base (default 50%) vs
@@ -194,6 +204,25 @@ local function Header(parent, x, yOff, text)
   fs:SetPoint("TOPLEFT", x, yOff)
   fs:SetText((text or ""):upper())
   return fs
+end
+
+-- Two-weight inline label: a Regular-weight prefix + a Semibold value, centered as a
+-- group inside `parent`. The "Profile: ‹Name›" convention (Regular label + Semibold value)
+-- recurs across buttons/headers, so it lives here. :Set(prefix, value) re-lays it out.
+-- swap=true puts the Semibold part first (used by the trigger state pills:
+-- "ACTIVE on Target" bold + " (Debuff)" regular).
+local function twoWeightLabel(parent, size, cc, swap)
+  cc = cc or { r = 1, g = 1, b = 1 }
+  local pre = newText(parent, swap and FONT.label or FONT.body,  size, cc, "LEFT")
+  local val = newText(parent, swap and FONT.body  or FONT.label, size, cc, "LEFT")
+  local h = { pre = pre, val = val }
+  function h:Set(prefix, value)
+    pre:SetText(prefix or ""); val:SetText(value or "")
+    local total = (pre:GetStringWidth() or 0) + 4 + (val:GetStringWidth() or 0)
+    pre:ClearAllPoints(); pre:SetPoint("LEFT", parent, "CENTER", -total / 2, 0)
+    val:ClearAllPoints(); val:SetPoint("LEFT", pre, "RIGHT", 4, 0)
+  end
+  return h
 end
 
 -- --------------------------------------------------------------------------
@@ -421,67 +450,60 @@ end
 -- --------------------------------------------------------------------------
 -- Numeric row: label + [−] + slider (best-effort) + [+] + value box.
 -- --------------------------------------------------------------------------
+-- Redesign slider (Figma): [label] [− pill] [track] [+ pill] [value box], 20px row.
+-- label = General Sans 12 white; −/+ = heroic-50% pills w/ Khand "−"/"+"; track =
+-- heroic-20% 166×6 with a 4×20 PURPLE thumb; value box = heroic-8% fill, centred.
+-- Positions match the mock at a ~360-wide parent. "Alpha %" shows a % in its box.
 local function MakeSlider(parent, yOff, label, minV, maxV, step, get, set)
+  local H = COLOR.heroic
+  local suffix = label:find("%%") and "%" or ""
+
   local title = newText(parent, FONT.body, 12, TEXT, "LEFT")
-  title:SetPoint("TOPLEFT", 16, yOff); title:SetWidth(66)
-  title:SetText(label)
+  title:SetPoint("LEFT", parent, "TOPLEFT", 4, yOff - 10); title:SetText(label)
 
-  local minus = flatButton(parent, 22, 20, COLOR.heroic, "−", 15)
-  minus:SetPoint("TOPLEFT", 86, yOff + 3)
+  local minus = flatButton(parent, 20, 20, H, "−", 16); minus:SetBase(0.5)
+  minus:SetPoint("TOPLEFT", 70, yOff); setFont(minus.text, FONT.head, 16)
 
-  -- Flat slider (own look, no template): a dark track matching the input fields
-  -- (no border) + an orange vertical marker for the thumb. Best-effort: if
-  -- it can't be built the row still works via the steppers + value box.
   local slider
   pcall(function() slider = CreateFrame("Slider", nil, parent) end)
   if slider then
-    slider:SetOrientation("HORIZONTAL")
-    slider:SetSize(150, 18); slider:SetPoint("TOPLEFT", 116, yOff + 1)
-    slider:SetHitRectInsets(0, 0, -5, -5)  -- taller grab area than the thin track
+    slider:SetOrientation("HORIZONTAL"); slider:SetSize(166, 20)
+    slider:SetPoint("TOPLEFT", 100, yOff); slider:SetHitRectInsets(0, 0, -6, -6)
     local track = slider:CreateTexture(nil, "BACKGROUND")
-    track:SetPoint("LEFT", 0, 0); track:SetPoint("RIGHT", 0, 0); track:SetHeight(8)
-    track:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.10)  -- = input-field fill
+    track:SetPoint("LEFT", 0, 0); track:SetPoint("RIGHT", 0, 0); track:SetHeight(6)
+    track:SetColorTexture(H.r, H.g, H.b, 0.20)
     local thumb = slider:CreateTexture(nil, "OVERLAY")
-    thumb:SetColorTexture(COLOR.orange.r, COLOR.orange.g, COLOR.orange.b, 1)      -- orange marker (#FF7729)
-    thumb:SetSize(6, 18)
+    thumb:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 1); thumb:SetSize(4, 20)
     slider:SetThumbTexture(thumb)
     slider:SetMinMaxValues(minV, maxV); slider:SetValueStep(step); slider:SetObeyStepOnDrag(true)
   end
 
-  local plus = flatButton(parent, 22, 20, COLOR.heroic, "+", 15)
-  plus:SetPoint("TOPLEFT", 272, yOff + 3)
+  local plus = flatButton(parent, 20, 20, H, "+", 16); plus:SetBase(0.5)
+  plus:SetPoint("TOPLEFT", 276, yOff); setFont(plus.text, FONT.head, 16)
 
-  local edit = flatEditBox(parent, 50, 20); edit:SetPoint("TOPLEFT", 306, yOff + 2)
+  local edit = CreateFrame("EditBox", nil, parent)
+  edit:SetSize(54, 20); edit:SetPoint("TOPLEFT", 306, yOff); edit:SetAutoFocus(false)
+  setFont(edit, FONT.body, 11); edit:SetTextColor(1, 1, 1); edit:SetJustifyH("CENTER"); edit:SetTextInsets(2, 2, 0, 0)
+  local ebg = edit:CreateTexture(nil, "BACKGROUND"); ebg:SetAllPoints(); ebg:SetColorTexture(H.r, H.g, H.b, 0.08)
 
   local applying = false
   local function clamp(v) return math.max(minV, math.min(maxV, math.floor(v + 0.5))) end
+  local function show(v) edit:SetText(tostring(v) .. suffix); edit:SetCursorPosition(0) end
   local function apply(v)
-    v = clamp(v)
-    applying = true
+    v = clamp(v); applying = true
     if slider then slider:SetValue(v) end
-    edit:SetText(tostring(v)); edit:SetCursorPosition(0)
-    applying = false
+    show(v); applying = false
     set(v); ReapplySelected()
   end
-
   if slider then slider:SetScript("OnValueChanged", function(_, v) if not applying then apply(v) end end) end
-  edit:SetScript("OnEnterPressed", function(self) local v = tonumber(self:GetText()); if v then apply(v) end self:ClearFocus() end)
+  edit:SetScript("OnEnterPressed", function(self) local v = tonumber((self:GetText() or ""):match("%-?%d+")); if v then apply(v) end self:ClearFocus() end)
   edit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
   minus:SetScript("OnClick", function() apply((get() or minV) - step) end)
   plus:SetScript("OnClick",  function() apply((get() or minV) + step) end)
 
   local row = {}
-  function row:refresh()
-    local v = clamp(get() or minV)
-    applying = true
-    if slider then slider:SetValue(v) end
-    edit:SetText(tostring(v)); edit:SetCursorPosition(0)
-    applying = false
-  end
-  function row:setEnabled(on)
-    if slider then slider:SetEnabled(on) end
-    edit:SetEnabled(on); minus:SetEnabled(on); plus:SetEnabled(on)
-  end
+  function row:refresh() local v = clamp(get() or minV); applying = true; if slider then slider:SetValue(v) end; show(v); applying = false end
+  function row:setEnabled(on) if slider then slider:SetEnabled(on) end edit:SetEnabled(on); minus:SetEnabled(on); plus:SetEnabled(on) end
   return row
 end
 
@@ -506,12 +528,13 @@ end
 -- Small flat checkbox: a 16px box + label. :Set/:Get + OnClick callback.
 local function flatCheck(parent, label)
   local c = CreateFrame("Button", nil, parent)
-  c:SetSize(16, 16)
-  local box = c:CreateTexture(nil, "ARTWORK"); box:SetAllPoints(); box:SetColorTexture(1, 1, 1, 0.08)
-  addEdges(c, COLOR.rim, 1)
-  c.mark = c:CreateTexture(nil, "OVERLAY"); c.mark:SetPoint("CENTER"); c.mark:SetSize(10, 10)
-  c.mark:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 1); c.mark:Hide()
-  c.label = newText(c, FONT.body, 12, TEXT, "LEFT"); c.label:SetPoint("LEFT", c, "RIGHT", 6, 0); c.label:SetText(label)
+  c:SetSize(20, 20)   -- Figma: 20px box, white 10% fill, orange ✓, no border
+  local box = c:CreateTexture(nil, "ARTWORK"); box:SetAllPoints(); box:SetColorTexture(1, 1, 1, 0.10)
+  -- Jason's checkmark_white.png fills the 20x20 box (its canvas = the Figma node), tinted orange.
+  c.mark = c:CreateTexture(nil, "OVERLAY"); c.mark:SetAllPoints()
+  c.mark:SetTexture(MEDIA .. "checkmark_white.png")
+  c.mark:SetVertexColor(COLOR.orange.r, COLOR.orange.g, COLOR.orange.b, 1); c.mark:Hide()
+  c.label = newText(c, FONT.body, 12, TEXT, "LEFT"); c.label:SetPoint("LEFT", c, "RIGHT", 8, 0); c.label:SetText(label)
   c._on = false
   function c:Get() return self._on end
   function c:Set(v) self._on = v and true or false; self.mark:SetShown(self._on) end
@@ -576,15 +599,28 @@ local function makeSwitch(parent, leftText, rightText, onChange)
   return s
 end
 
+-- Single on/off toggle (Figma): a 40x20 white-10% track + a 20x20 purple knob that
+-- slides (left=off, right=on). Caller places it + adds its own label; get/set drive state.
+local function makeToggle(parent, get, set)
+  local t = CreateFrame("Button", nil, parent); t:SetSize(40, 20)
+  local track = t:CreateTexture(nil, "BACKGROUND"); track:SetAllPoints(); track:SetColorTexture(1, 1, 1, 0.1)
+  local knob = t:CreateTexture(nil, "ARTWORK"); knob:SetSize(20, 20)
+  knob:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 1)
+  function t:refresh() knob:ClearAllPoints(); knob:SetPoint(get() and "RIGHT" or "LEFT", 0, 0) end
+  t:SetScript("OnClick", function() set(not get()); t:refresh() end)
+  t:refresh()
+  return t
+end
+
 -- Colour control: [✓ <label>] + a swatch. Clicking either opens the game
 -- ColorPickerFrame; unchecking clears the colour (set(nil)). Label defaults to
 -- "Tint" (reused for the glow drawer's "Custom Color").
 local function MakeColor(parent, x, yOff, get, set, label)
   local chk = flatCheck(parent, label or "Tint")
   chk:SetPoint("TOPLEFT", x, yOff)
-  local swatch = CreateFrame("Button", nil, parent); swatch:SetSize(16, 16)
-  swatch:SetPoint("LEFT", chk.label, "RIGHT", 6, 0)
-  local sw = swatch:CreateTexture(nil, "ARTWORK"); sw:SetAllPoints(); addEdges(swatch, COLOR.rim, 1)
+  local swatch = CreateFrame("Button", nil, parent); swatch:SetSize(29, 20)   -- Figma: 29x20 solid
+  swatch:SetPoint("LEFT", chk.label, "RIGHT", 8, 0)
+  local sw = swatch:CreateTexture(nil, "ARTWORK"); sw:SetAllPoints()
 
   local function updateSwatch()
     local col = get()
@@ -640,25 +676,27 @@ end
 -- value that opens a list of options below it. Only one dropdown menu is open at a
 -- time. values = { {storedValue, label}, ... }.
 local openDropdownMenu
+-- Redesign dropdown (Figma): a heroic-50% pill (28px tall) with a centred two-weight
+-- label — Regular "Prefix:" + Semibold value — opening a list below.
 local function MakeDropdown(parent, x, yOff, w, prefix, values, get, set)
-  local b = flatButton(parent, w, 20, COLOR.heroic, "", 12)
-  b:SetPoint("TOPLEFT", x, yOff)
-  local function label()
-    local cur = get()
-    for _, v in ipairs(values) do if v[1] == cur then return prefix .. v[2] end end
-    return prefix .. values[1][2]
-  end
+  local H = COLOR.heroic
+  prefix = (prefix or ""):gsub("%s+$", "")
+  local b = flatButton(parent, w, 28, H, "", 11); b:SetBase(0.5); b:SetPoint("TOPLEFT", x, yOff)
+  b.text:Hide()
+  local lbl = twoWeightLabel(b, 11)
+  local function curLabel() local cur = get(); for _, v in ipairs(values) do if v[1] == cur then return v[2] end end return values[1][2] end
+  local function refreshLabel() lbl:Set(prefix, curLabel()) end
   local menu = CreateFrame("Frame", nil, parent)
   menu:SetSize(w, #values * 22 + 8)
   menu:SetPoint("TOPLEFT", b, "BOTTOMLEFT", 0, -2)
   menu:SetFrameLevel((parent:GetFrameLevel() or 1) + 20)  -- draw above the rows below
-  skinPlate(menu); menu:Hide()
+  skinPlate(menu); addEdges(menu, COLOR.rim, 1); menu:Hide()
   for i, v in ipairs(values) do
-    local item = flatButton(menu, w - 8, 20, COLOR.heroic, v[2], 12); item:SetBase(0.12)
+    local item = flatButton(menu, w - 8, 20, H, v[2], 12); item:SetBase(0.12)
     item:SetPoint("TOPLEFT", 4, -4 - (i - 1) * 22)
     item:SetScript("OnClick", function()
       menu:Hide(); openDropdownMenu = nil
-      set(v[1]); b:SetText(label()); ReapplySelected()
+      set(v[1]); refreshLabel(); ReapplySelected()
     end)
   end
   b:SetScript("OnClick", function()
@@ -668,8 +706,9 @@ local function MakeDropdown(parent, x, yOff, w, prefix, values, get, set)
       menu:Show(); openDropdownMenu = menu
     end
   end)
+  refreshLabel()
   local row = {}
-  function row:refresh() b:SetText(label()) end
+  function row:refresh() refreshLabel() end
   function row:setEnabled(on) b:SetEnabled(on); if not on then menu:Hide() end end
   return row
 end
@@ -747,10 +786,11 @@ end
 -- --------------------------------------------------------------------------
 local function SetSelected(sid)
   selectedID = sid
+  if C._trig then C._trig.editID = sid end   -- inline Trigger section edits the selected aura
   if GA.Displays then GA.Displays:SetSelectedDisplay(sid) end  -- only this one is draggable
   local cfg = Cfg()
   if editorName then
-    if cfg then editorName:SetText(cfg.label or tostring(sid)); editorName:Enable()
+    if cfg then editorName:SetText(cfg.label or tostring(sid)); editorName:SetCursorPosition(0); editorName:Enable()
     else editorName:SetText(""); editorName:ClearFocus(); editorName:Disable() end
   end
   if triggerSummary then triggerSummary:SetText(cfg and SummaryText(cfg) or "") end
@@ -758,6 +798,9 @@ local function SetSelected(sid)
   for _, r in ipairs(rows) do r:refresh(); r:setEnabled(cfg ~= nil) end
   if C.RefreshTextEditor then C:RefreshTextEditor() end   -- text drawer follows selection (self-guards to when open)
   if C.RefreshGlowEditor then C:RefreshGlowEditor() end   -- glow drawer follows selection too
+  if C.RefreshGroupButton then C:RefreshGroupButton() end -- left-pane Group button label
+  if C.TrigInlineRender then C:TrigInlineRender() end     -- inline Trigger section follows selection
+  if C.UpdateNameHint then C:UpdateNameHint() end          -- hide "CLICK TO RENAME" under a long name
   RefreshList()
   if GA.Displays then GA.Displays:RefreshForced() end   -- preview: show the selected + eye-on, hide the rest
 end
@@ -1586,6 +1629,7 @@ function C:RenderTrigRow(row, e)
 end
 
 function C:TrigRender()
+  if C.TrigInlineRender then C:TrigInlineRender() end   -- inline accordion section (redesign)
   if not C._trig.frame then return end
   local cfg = self:TrigCfg(); if not cfg then return end
   local t = self:TrigTree()
@@ -1884,13 +1928,16 @@ end
 -- --------------------------------------------------------------------------
 -- Build the main panel (two-pane: aura list | settings editor).
 -- --------------------------------------------------------------------------
-local PANEL_W, PANEL_H = 580, 740
+local PANEL_W, PANEL_H = 620, 740
 local INSET, TITLEBAR_H = 14, 32
 local CONTENT_TOP = -(TITLEBAR_H + 8)   -- -40
+local PAD_L = 30                          -- left-content margin (matches the Figma mock)
 local LIST_W = 160
-local EDITOR_X = INSET + LIST_W + 16     -- 190
-local EDITOR_W = PANEL_W - EDITOR_X - INSET  -- 376
-local PANE_H = 636
+local DIVIDER_X = 220                     -- vertical divider between the list and the editor
+local EDITOR_X = 240                      -- editor content x (20px right of the divider)
+local EDITOR_W = PANEL_W - EDITOR_X - 20  -- 360 (20px right margin, matches the mock)
+local PANE_H = 614   -- list pane ends at the footer divider (PANEL_H - FOOTER_H - CONTENT_TOP margin)
+local FOOTER_H = 86                       -- footer strip: the divider sits FOOTER_H above the bottom
 
 -- The aura editor's GROUP section — now JUST the "which group is this aura in"
 -- assignment dropdown (a group's OWN settings live in the Manage Group drawer, opened
@@ -2226,8 +2273,8 @@ end
 
 -- Keep the bottom-strip button label ("Profile: <name>") in sync.
 function C:UpdateProfileButton()
-  if self._profileBtn then
-    self._profileBtn:SetText("Profile: " .. (GA:ActiveProfileName() or "?"))
+  if self._profileLabel then
+    self._profileLabel:Set("Profile:", GA:ActiveProfileName() or "?")
   end
 end
 
@@ -2537,36 +2584,741 @@ function C:RefreshGlowEditor()
   for _, r in ipairs(C._glow.rows) do r:refresh() end
 end
 
+-- ---------------------------------------------------------------------------
+-- Landing (Default State) + panel mode switch. The panel opens to the landing:
+-- a big logo + three "Add ‹type› Aura" create buttons + "View All Auras". Picking
+-- a type (or View All) swaps to the editor; the left pane's "New Aura" swaps back.
+-- The list + editor panes and the landing overlay share one content area (toggled);
+-- the footer (Hide-CDM + Profile) and the dividers stay visible in both states.
+-- These live on the C table (methods, not chunk locals) to stay under the Lua caps.
+-- ---------------------------------------------------------------------------
+function C:ShowLanding()
+  C.mode = "landing"
+  if listFrame then listFrame:Hide() end
+  if C._editor then C._editor:Hide() end
+  if C._landing then C._landing:Show() end
+  selectedID = nil
+  if GA.Displays then
+    GA.Displays:SetSelectedDisplay(nil)   -- nothing selected → nothing forced-draggable
+    GA.Displays:RefreshForced()           -- preview shows only eye-on auras
+  end
+end
+
+function C:ShowEditor()
+  C.mode = "editor"
+  if C._landing then C._landing:Hide() end
+  if listFrame then listFrame:Show() end
+  if C._editor then C._editor:Show() end
+end
+
+-- Create a blank aura of the chosen type and open it in the editor. Icon + Texture are
+-- both texture-kind displays (they differ only in which editor sections lead); Bar is a
+-- StatusBar display. Spells/sources are added later, inside the editor.
+function C:CreateAura(uiType)
+  local db = DB(); if not db then return end
+  local id = NewDisplayID()
+  if uiType == "bar" then
+    db[id] = {
+      kind = "bar", uiType = "bar", label = "New Bar Aura", enabled = true,
+      width = 220, height = 24, point = { "CENTER", 0, -120 }, alpha = 1, showLabel = false,
+      bar = { mode = "aura_dur" },
+    }
+  else
+    db[id] = {
+      uiType = uiType, label = (uiType == "texture") and "New Texture Aura" or "New Icon Aura",
+      enabled = true, width = 64, height = 64, point = { "CENTER", 0, 120 }, alpha = 1,
+      showLabel = false, texture = MEDIA .. "Textures\\Circle_Smooth",   -- neutral placeholder
+    }
+  end
+  if GA.CDM then GA.CDM:Discover() end
+  C:ShowEditor()
+  SetSelected(id)
+end
+
+-- The landing overlay: a transparent, mouse-transparent frame filling the panel so the
+-- footer + X below stay clickable. Holds the logo and the create / View All buttons.
+function C:BuildLanding(p)
+  local L = CreateFrame("Frame", nil, p)
+  L:SetAllPoints(p)
+  C._landing = L
+
+  -- Logo (monogram + wordmark) — transparent PNG at the Figma position (197x248 @ 317,187).
+  local logo = L:CreateTexture(nil, "ARTWORK")
+  logo:SetTexture(MEDIA .. "ga_logo_full.png")
+  logo:SetSize(197, 248)
+  logo:SetPoint("TOPLEFT", 317, -187)
+
+  -- Three create buttons (bright purple), stacked in the left pane.
+  local defs = { { "Add Icon Aura", "icon", 216 }, { "Add Texture Aura", "texture", 264 }, { "Add Bar Aura", "bar", 312 } }
+  for _, d in ipairs(defs) do
+    local uiType = d[2]
+    local b = flatButton(L, LIST_W, 28, COLOR.heroic, d[1], 12)   -- Figma: #8031ff @ 0.2 fill
+    setFont(b.text, FONT.label, 12)   -- General Sans Semibold 12
+    b:SetBase(0.2); b:SetPoint("TOPLEFT", PAD_L, -d[3])
+    b:SetScript("OnClick", function() C:CreateAura(uiType) end)
+  end
+
+  -- View All Auras — de-emphasised (orange @ 0.2), lower in the left pane.
+  local viewAll = flatButton(L, LIST_W, 28, COLOR.orange, "View All Auras", 11)
+  setFont(viewAll.text, FONT.body, 11)   -- General Sans Regular 11
+  viewAll:SetBase(0.2); viewAll:SetPoint("TOPLEFT", PAD_L, -592)
+  viewAll:SetScript("OnClick", function() C:ShowEditor(); SetSelected(DisplayList()[1]) end)
+end
+
+-- ===========================================================================
+-- ACCORDION EDITOR (redesign). The right pane is the aura NAME field followed by a
+-- one-open-at-a-time accordion of collapsible sections. Each section = an orange
+-- caret + Khand-uppercase header (click to expand) + a content frame; expanding one
+-- collapses the others and the stack reflows. Built as C-methods (own upvalue budgets)
+-- so Build() stays under Lua 5.1's 60-upvalue cap.  [Slice 2: Appearance is inline;
+-- the other sections open their existing drawers for now — inlined in Slice 3.]
+-- ===========================================================================
+local ACC_HDR_H, ACC_GAP, ACC_NAME_H = 20, 10, 32
+
+-- Add a section under the name field. builder(content) populates it; height = its
+-- fixed content height. Sections live on C._acc.sections in insertion order.
+function C:AccordionAddSection(key, title, height, builder)
+  local editor = C._acc.editor
+  local hdr = CreateFrame("Button", nil, editor); hdr:SetSize(EDITOR_W, ACC_HDR_H)
+  local caret = hdr:CreateTexture(nil, "OVERLAY"); caret:SetSize(8, 9); caret:SetPoint("LEFT", 2, 0)
+  caret:SetTexture(MEDIA .. "triangle.png"); caret:SetVertexColor(1, 1, 1, 1)  -- triangle.png is already orange
+  local lbl = newText(hdr, FONT.head, 16, COLOR.purple, "LEFT")   -- Khand Medium 16, purple
+  lbl:SetPoint("LEFT", 17, 0); lbl:SetText((title or ""):upper())
+  local content = CreateFrame("Frame", nil, editor); content:SetSize(EDITOR_W, height); content:Hide()
+  local s = { key = key, header = hdr, caret = caret, content = content, height = height, expanded = false }
+  hdr:SetScript("OnClick", function() C:AccordionToggle(key) end)
+  if builder then builder(content) end
+  C._acc.sections[#C._acc.sections + 1] = s
+  return s
+end
+
+-- Click a header: toggle it, collapse the rest (one open at a time), reflow.
+function C:AccordionToggle(key)
+  local secs = C._acc.sections
+  local wasOpen
+  for _, s in ipairs(secs) do if s.key == key then wasOpen = s.expanded end end
+  for _, s in ipairs(secs) do s.expanded = (s.key == key) and (not wasOpen) or false end
+  C:AccordionLayout()
+end
+
+function C:AccordionOpen(key)   -- force exactly one section open
+  for _, s in ipairs(C._acc.sections) do s.expanded = (s.key == key) end
+  C:AccordionLayout()
+end
+
+-- Reflow: stack headers top-to-bottom; an expanded section inserts its content.
+function C:AccordionLayout()
+  local y = C._acc.top
+  for _, s in ipairs(C._acc.sections) do
+    s.header:ClearAllPoints(); s.header:SetPoint("TOPLEFT", 0, y)
+    s.caret:SetRotation(s.expanded and CARET_DOWN or 0)
+    y = y - ACC_HDR_H
+    if s.expanded then
+      s.content:ClearAllPoints(); s.content:SetPoint("TOPLEFT", 0, y - 13); s.content:Show()
+      y = y - 13 - s.height
+    else
+      s.content:Hide()
+    end
+    y = y - ACC_GAP
+  end
+end
+
+-- Update a section's content height (used by the Trigger section, which grows/shrinks
+-- with its conditions) and reflow.
+function C:AccordionSetHeight(key, h)
+  for _, s in ipairs(C._acc.sections) do
+    if s.key == key then s.height = h; s.content:SetHeight(h); break end
+  end
+  C:AccordionLayout()
+end
+
+-- The Appearance, Position & Size section — texture + recolor/desaturate + blend/strata
+-- + alpha + width/height (aspect-linked) + X/Y. Reuses the shipped controls; laid out
+-- to the mock's vertical rhythm (internal pixel polish is an iteration item).
+function C:BuildAppearanceSection(ct)
+  local H = COLOR.heroic
+
+  -- Texture field (heroic-8% fill, placeholder when empty) + Choose pill.
+  local tfield = CreateFrame("EditBox", nil, ct); tfield:SetSize(270, 28); tfield:SetPoint("TOPLEFT", 0, 0)
+  tfield:SetAutoFocus(false); setFont(tfield, FONT.body, 11); tfield:SetTextColor(1, 1, 1); tfield:SetTextInsets(10, 10, 0, 0)
+  local tbg = tfield:CreateTexture(nil, "BACKGROUND"); tbg:SetAllPoints(); tbg:SetColorTexture(H.r, H.g, H.b, 0.08)
+  local tph = newText(tfield, FONT.body, 11, TEXT, "LEFT"); tph:SetPoint("LEFT", 10, 0); tph:SetAlpha(0.3)
+  tph:SetText("Leave blank to adopt the first trigger's icon")
+  local function tUpdPH() tph:SetShown((tfield:GetText() or "") == "") end
+  tfield:SetScript("OnTextChanged", tUpdPH)
+  tfield:SetScript("OnEnterPressed", function(self)
+    local c = Cfg(); if c then local t = self:GetText(); if t == "" then t = nil end; c.texture = t; ReapplySelected(); RefreshList() end
+    self:ClearFocus()
+  end)
+  tfield:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  rows[#rows + 1] = {
+    refresh = function() local c = Cfg(); local v = c and c.texture; tfield:SetText(v ~= nil and tostring(v) or ""); tfield:SetCursorPosition(0); tUpdPH() end,
+    setEnabled = function(_, on) tfield:SetEnabled(on) end }
+
+  local choose = flatButton(ct, 80, 28, H, "Choose", 11); choose:SetBase(0.5); choose:SetPoint("TOPLEFT", 280, 0)
+  setFont(choose.text, FONT.body, 11)
+  choose:SetScript("OnClick", function()
+    local c = Cfg(); if not c then return end
+    OpenTexturePicker(function(tex) c.texture = tex; ReapplySelected(); C:RefreshCurrent(); RefreshList() end, c.texture)
+  end)
+  rows[#rows + 1] = { refresh = function() end, setEnabled = function(_, on) choose:SetEnabled(on) end }
+
+  -- Recolor (check + swatch) + Desaturate (check).
+  rows[#rows + 1] = MakeColor(ct, 0, -48,
+    function() local c = Cfg(); return c and c.color end,
+    function(v) local c = Cfg(); if c then c.color = v end end, "Recolor")
+  local desat = flatCheck(ct, "Desaturate"); desat:SetPoint("TOPLEFT", 156, -48)
+  desat:SetScript("OnClick", function()
+    local c = Cfg(); if not c then return end
+    desat:Set(not desat:Get()); c.desaturate = desat:Get() or nil; ReapplySelected()
+  end)
+  rows[#rows + 1] = { refresh = function() local c = Cfg(); desat:Set(c and c.desaturate) end,
+                      setEnabled = function(_, on) desat:SetEnabled(on) end }
+
+  -- Blend / Strata pills.
+  rows[#rows + 1] = MakeDropdown(ct, 0, -88, 175, "Blend Mode:", BLEND_MODES,
+    function() local c = Cfg(); return (c and c.blend) or "BLEND" end,
+    function(v) local c = Cfg(); if c then c.blend = (v ~= "BLEND") and v or nil end end)
+  rows[#rows + 1] = MakeDropdown(ct, 185, -88, 175, "Strata:", STRATA_MODES,
+    function() local c = Cfg(); return (c and c.strata) or "HIGH" end,
+    function(v) local c = Cfg(); if c then c.strata = (v ~= "HIGH") and v or nil end end)
+
+  -- Alpha.
+  rows[#rows + 1] = MakeSlider(ct, -136, "Alpha %", 0, 100, 5,
+    function() local c = Cfg(); return c and ((c.alpha or 1) * 100) end,
+    function(v) local c = Cfg(); if c then c.alpha = v / 100 end end)
+
+  -- Width / Height (aspect-linked) + a link toggle sitting between the two rows.
+  local widthRow, heightRow
+  local function clampDim(n) return math.max(8, math.min(8192, math.floor(n + 0.5))) end
+  widthRow = MakeSlider(ct, -189, "Width", 8, 8192, 2,
+    function() local c = Cfg(); return c and (c.width or c.size) end,
+    function(v) local c = Cfg(); if not c then return end c.width = v; if c.lockAspect then c.height = clampDim(v / (c.aspect or 1)); if heightRow then heightRow:refresh() end end end)
+  rows[#rows + 1] = widthRow
+  heightRow = MakeSlider(ct, -222, "Height", 8, 8192, 2,
+    function() local c = Cfg(); return c and (c.height or c.size) end,
+    function(v) local c = Cfg(); if not c then return end c.height = v; if c.lockAspect then c.width = clampDim(v * (c.aspect or 1)); if widthRow then widthRow:refresh() end end end)
+  rows[#rows + 1] = heightRow
+
+  local aspectBtn = CreateFrame("Button", nil, ct); aspectBtn:SetSize(16, 16); aspectBtn:SetPoint("TOPLEFT", 48, -199)
+  local alock = aspectBtn:CreateTexture(nil, "ARTWORK"); alock:SetAllPoints()
+  local LOCK_ON, LOCK_OFF = MEDIA .. "lock_locked.png", MEDIA .. "lock_unlocked.png"
+  local function alockRefresh() local c = Cfg(); alock:SetTexture((c and c.lockAspect) and LOCK_ON or LOCK_OFF); alock:SetVertexColor(1, 1, 1, 1) end
+  aspectBtn:SetScript("OnClick", function()
+    local c = Cfg(); if not c then return end
+    local on = not c.lockAspect; c.lockAspect = on or nil
+    if on then local w, h = (c.width or c.size or 64), (c.height or c.size or 64); c.aspect = (h > 0) and (w / h) or 1 end
+    alockRefresh()
+  end)
+  rows[#rows + 1] = { refresh = alockRefresh, setEnabled = function(_, on) aspectBtn:SetEnabled(on); alock:SetDesaturated(not on) end }
+
+  -- X / Y offset.
+  rows[#rows + 1] = MakeSlider(ct, -255, "X Offset", -2000, 2000, 5,
+    function() local c = Cfg(); return c and c.point and c.point[2] end,
+    function(v) local c = Cfg(); if c then c.point = { "CENTER", v, (c.point and c.point[3]) or 0 } end end)
+  rows[#rows + 1] = MakeSlider(ct, -288, "Y Offset", -2000, 2000, 5,
+    function() local c = Cfg(); return c and c.point and c.point[3] end,
+    function(v) local c = Cfg(); if c then c.point = { "CENTER", (c.point and c.point[2]) or 0, v } end end)
+end
+
+-- Show "CLICK TO RENAME" only when the current name is short enough not to run under it.
+function C:UpdateNameHint()
+  if not (C._nameHint and C._nameMeasure) then return end
+  local c = Cfg(); C._nameMeasure:SetText((c and c.label) or "")
+  C._nameHint:SetShown((C._nameMeasure:GetStringWidth() or 0) <= (EDITOR_W - 120))
+end
+
+-- Build the editor: the name field + the icon-section accordion.
+function C:BuildEditor(editor)
+  C._acc = { editor = editor, sections = {}, top = -54 }   -- top = first header y (below the name)
+
+  -- Aura NAME field — prominent + editable. Khand SemiBold 20 white on a heroic-8%
+  -- fill; "CLICK TO RENAME" in orange @ 30% on the right. (Renames cfg.label.)
+  editorName = CreateFrame("EditBox", nil, editor)
+  editorName:SetPoint("TOPLEFT", 0, -2); editorName:SetSize(EDITOR_W, ACC_NAME_H)
+  editorName:SetAutoFocus(false); editorName:SetTextInsets(10, 92, 0, 0)
+  setFont(editorName, FONT.title, 20); editorName:SetTextColor(1, 1, 1)
+  local nameBG = editorName:CreateTexture(nil, "BACKGROUND"); nameBG:SetAllPoints()
+  nameBG:SetColorTexture(COLOR.heroic.r, COLOR.heroic.g, COLOR.heroic.b, 0.08)
+  local nameHint = newText(editorName, FONT.body, 11, COLOR.orange, "RIGHT")
+  nameHint:SetPoint("RIGHT", -10, 0); nameHint:SetText("CLICK TO RENAME"); nameHint:SetAlpha(0.3)
+  C._nameHint = nameHint
+  -- Hidden string to measure the name width (so the hint hides when a long name would collide).
+  C._nameMeasure = editor:CreateFontString(nil, "OVERLAY"); setFont(C._nameMeasure, FONT.title, 20); C._nameMeasure:Hide()
+  editorName:SetScript("OnEditFocusGained", function() nameBG:SetColorTexture(COLOR.heroic.r, COLOR.heroic.g, COLOR.heroic.b, 0.18); nameHint:Hide() end)
+  editorName:SetScript("OnEditFocusLost",  function() nameBG:SetColorTexture(COLOR.heroic.r, COLOR.heroic.g, COLOR.heroic.b, 0.08); C:UpdateNameHint() end)
+  editorName:SetScript("OnEnterPressed", function(self)
+    local c = Cfg(); if c then local txt = self:GetText(); if txt and txt:gsub("%s", "") ~= "" then c.label = txt end end
+    self:ClearFocus(); local c2 = Cfg(); self:SetText((c2 and c2.label) or ""); RefreshList(); ReapplySelected()
+  end)
+  editorName:SetScript("OnEscapePressed", function(self) local c = Cfg(); self:SetText((c and c.label) or ""); self:ClearFocus() end)
+
+  -- Icon-aura sections. Appearance is inline; the rest bridge to their drawers for now.
+  C:AccordionAddSection("trigger", "Aura Trigger(s)", 120, function(ct) C:BuildTriggerSection(ct) end)
+  C:AccordionAddSection("appearance", "Appearance, Position & Size", 310, function(ct) C:BuildAppearanceSection(ct) end)
+  C:AccordionAddSection("text", "Text", 285, function(ct) C:BuildTextSection(ct) end)
+  C:AccordionAddSection("effects", "Effects & Motion", 92, function(ct) C:BuildEffectsSection(ct) end)
+  C:AccordionAddSection("sounds", "Sounds", 40, function(ct)
+    local sb = flatButton(ct, 150, 22, COLOR.heroic, "None", 12); sb:SetBase(0.4); sb:SetPoint("TOPLEFT", 2, -6)
+    local function soundLabel() local c = Cfg(); return (c and c.sound and c.sound.name) or "None" end
+    sb:SetScript("OnClick", function()
+      local c = Cfg(); if not c then return end
+      OpenSoundPicker(function(item)
+        if item.file then c.sound = { file = item.file, name = item.name, channel = "Master" } else c.sound = nil end
+        sb:SetText(soundLabel())
+      end, c.sound and c.sound.file)
+    end)
+    local tb = flatButton(ct, 52, 22, COLOR.heroic, "Test", 12); tb:SetBase(0.4); tb:SetPoint("LEFT", sb, "RIGHT", 8, 0)
+    tb:SetScript("OnClick", function() local c = Cfg(); if c and c.sound and c.sound.file then pcall(PlaySoundFile, c.sound.file, c.sound.channel or "Master") end end)
+    rows[#rows + 1] = { refresh = function() sb:SetText(soundLabel()) end, setEnabled = function(_, on) sb:SetEnabled(on); tb:SetEnabled(on) end }
+  end)
+  C:AccordionAddSection("load", "Aura Load Conditions", 40, function(ct)
+    local b = flatButton(ct, 130, 24, COLOR.heroic, "Visibility…", 12); b:SetBase(0.4); b:SetPoint("TOPLEFT", 2, -6)
+    b:SetScript("OnClick", function() if selectedID then OpenVisibilityEditor(selectedID) end end)
+    visibilitySummary = newText(ct, FONT.body, 12, TEXT, "LEFT")
+    visibilitySummary:SetPoint("LEFT", b, "RIGHT", 10, 0); visibilitySummary:SetWidth(210); visibilitySummary:SetJustifyH("LEFT")
+  end)
+
+  C:AccordionOpen("trigger")   -- icon aura default-opens its Trigger section (matches the mock)
+end
+
+-- Left-pane button stack (Figma): New / Duplicate / Delete (dark red) / Group (dark
+-- green, two-weight label). 28px tall, 10px gaps, anchored above the footer divider.
+-- Fills: heroic@0.5 / heroic@0.5 / red@0.3 / green@0.3; labels General Sans Semibold 11.
+function C:BuildLeftButtons(listFrame)
+  local H = COLOR.heroic
+  local function mk(label, cc, base, yBot, onClick)
+    local b = flatButton(listFrame, LIST_W, 28, cc, label, 11); b:SetBase(base)
+    setFont(b.text, FONT.label, 11); b:SetPoint("BOTTOMLEFT", 0, yBot); b:SetScript("OnClick", onClick)
+    return b
+  end
+  mk("NEW AURA", H, 0.5, 148, function() C:ShowLanding() end)
+  mk("DUPLICATE AURA", H, 0.5, 110, function()
+    if not (selectedID and DB() and DB()[selectedID]) then return end
+    local copy = DeepCopy(DB()[selectedID]); copy.label = (copy.label or "Aura") .. " (copy)"
+    local p = copy.point or { "CENTER", 0, 0 }; copy.point = { "CENTER", (p[2] or 0) + 24, (p[3] or 0) - 24 }
+    local id = NewDisplayID(); DB()[id] = copy
+    if GA.CDM then GA.CDM:Discover() end
+    SetSelected(id)
+  end)
+  mk("DELETE AURA", COLOR.red, 0.3, 72, function()
+    if selectedID and DB() then
+      local gone = selectedID; DB()[gone] = nil
+      if GA.Displays and GA.Displays.frames[gone] then GA.Displays.frames[gone]:Hide() end
+      if GA.CDM then GA.CDM:Discover() end
+      SetSelected(DisplayList()[1])
+    end
+  end)
+
+  local gb = flatButton(listFrame, LIST_W, 28, COLOR.green, "", 11); gb:SetBase(0.3)
+  gb:SetPoint("BOTTOMLEFT", 0, 34); gb.text:Hide()
+  C._groupBtn, C._groupLabel = gb, twoWeightLabel(gb, 11)
+  gb:SetScript("OnClick", function() C:OpenGroupAssignMenu(gb) end)
+  C:RefreshGroupButton()
+end
+
+-- Group button label = the selected aura's group (Ungrouped if none). Hidden with no selection.
+function C:RefreshGroupButton()
+  if not C._groupLabel then return end
+  local c = Cfg()
+  local name = (c and c.group and Groups() and Groups()[c.group] and Groups()[c.group].name) or "Ungrouped"
+  C._groupLabel:Set("Group:", name)
+  if C._groupBtn then C._groupBtn:SetShown(c ~= nil) end
+end
+
+-- Pop-up (opens upward from the Group button) to assign the selected aura to a group:
+-- Ungrouped + each group + "+ New Group…".
+function C:OpenGroupAssignMenu(anchor)
+  local c = Cfg(); if not c then return end
+  local menu = C._grpMenu
+  if menu and menu:IsShown() then menu:Hide(); return end
+  if not menu then
+    menu = CreateFrame("Frame", nil, panel); C._grpMenu = menu
+    menu:SetFrameStrata("FULLSCREEN_DIALOG"); skinPlate(menu); addEdges(menu, COLOR.rim, 1)
+    menu._rows = {}
+  end
+  local items = { { nil, "Ungrouped" } }
+  for _, gid in ipairs(GroupList()) do items[#items + 1] = { gid, Groups()[gid].name or "Group" } end
+  items[#items + 1] = { "__new", "+ New Group…" }
+  menu:SetSize(LIST_W, #items * 24 + 8)
+  menu:ClearAllPoints(); menu:SetPoint("BOTTOMLEFT", anchor, "TOPLEFT", 0, 4)
+  for _, r in ipairs(menu._rows) do r:Hide() end
+  for i, it in ipairs(items) do
+    local r = menu._rows[i]
+    if not r then r = flatButton(menu, LIST_W - 8, 20, COLOR.heroic, "", 11); r:SetBase(0.15); menu._rows[i] = r end
+    r:SetText(it[2]); r:ClearAllPoints(); r:SetPoint("TOPLEFT", 4, -4 - (i - 1) * 24); r:Show()
+    local val = it[1]
+    r:SetScript("OnClick", function()
+      menu:Hide(); local cur = Cfg(); if not cur then return end
+      if val == "__new" then
+        OpenNameDialog("New Group", "", function(nm) local gid = CreateGroup(nm); if gid then cur.group = gid; RefreshList(); C:RefreshGroupButton() end end)
+      else
+        cur.group = val; RefreshList(); C:RefreshGroupButton()
+      end
+    end)
+  end
+  menu:Show()
+end
+
+-- ===========================================================================
+-- Inline AURA TRIGGER(S) section (redesign). Match ALL/ANY/NONE segmented control +
+-- a bordered box of condition rows + an "Add a Trigger" bar. Reuses the trigger engine
+-- (C:TrigTree / TrigAddLeaf / TrigRemove / TrigCycleState); this is just the inline UI.
+-- The box grows/shrinks with the conditions, so it drives C:AccordionSetHeight to reflow.
+-- [Slice 3a-i: flat conditions. Nested TRIGGER GROUP rendering comes in 3a-ii.]
+-- ===========================================================================
+local TRIG_LOGICS = { { "AND", "ALL" }, { "OR", "ANY" }, { "NONE", "NONE" } }
+
+-- One condition row: right-aligned [name] [icon] = [STATE pill] [X]. Works at the top
+-- level (ci=nil) and inside a group (ci set). Shift-clicking a TOP-LEVEL row selects it
+-- (→ "Add to Trigger Group" moves the selection into a new group).
+function C:MakeTrigRow(parent)
+  local H = COLOR.heroic
+  local row = CreateFrame("Button", nil, parent); row:SetSize(340, 20); row:RegisterForClicks("LeftButtonUp")
+  local selTex = row:CreateTexture(nil, "BACKGROUND"); selTex:SetPoint("TOPLEFT", -2, 2); selTex:SetPoint("BOTTOMRIGHT", 2, -2)
+  selTex:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.25); selTex:Hide(); row.selTex = selTex
+  local x = flatButton(row, 20, 20, H, "X", 11); x:SetBase(0.5); x:SetPoint("TOPRIGHT", 0, 0); row.x = x
+  local pill = flatButton(row, 170, 20, H, "", 11); pill:SetBase(0.5); pill:SetPoint("RIGHT", x, "LEFT", -8, 0); pill.text:Hide()
+  row.pillLbl = twoWeightLabel(pill, 11, nil, true); row.pill = pill
+  local eq = newText(row, FONT.body, 11, TEXT, "LEFT"); eq:SetPoint("RIGHT", pill, "LEFT", -4, 0); eq:SetText("="); row.eq = eq
+  local icon = row:CreateTexture(nil, "ARTWORK"); icon:SetSize(20, 19); icon:SetPoint("RIGHT", eq, "LEFT", -4, 0)
+  icon:SetTexCoord(0.08, 0.92, 0.08, 0.92); row.icon = icon
+  local name = newText(row, FONT.body, 11, TEXT, "RIGHT"); name:SetPoint("RIGHT", icon, "LEFT", -4, 0); name:SetWordWrap(false); row.name = name
+  x:SetScript("OnClick", function() C:TrigRemove(row._ti, row._ci) end)
+  pill:SetScript("OnClick", function() C:TrigCycleState(row._ti, row._ci) end)
+  row:SetScript("OnClick", function()
+    if row._ci or not row._leaf then return end        -- only top-level leaves are groupable
+    if IsShiftKeyDown() then
+      local sel = C._trigUI.selected
+      sel[row._leaf] = (not sel[row._leaf]) or nil
+      C:TrigInlineRender()
+    end
+  end)
+  return row
+end
+
+function C:FillTrigRow(row, ti, ci, leaf)
+  row._ti, row._ci, row._leaf = ti, ci, leaf
+  local ic = leaf.spellID and C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(leaf.spellID)
+  row.icon:SetTexture(ic or 134400)
+  row.name:SetText(leaf.name or (leaf.spellID and C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(leaf.spellID)) or "?")
+  local main, suf = TrigPill(leaf.state, leaf.k)
+  row.pillLbl:Set(main, suf)
+  row.selTex:SetShown(ci == nil and C._trigUI.selected[leaf] and true or false)
+end
+
+-- A nested TRIGGER GROUP box (orange): "TRIGGER GROUP N" + Match: ALL/ANY/NONE + its own
+-- condition rows + a remove-group X. Its own row pool lives on g._rows.
+function C:MakeTrigGroupBox(parent)
+  local O = COLOR.orange
+  local g = CreateFrame("Frame", nil, parent)
+  local bg = g:CreateTexture(nil, "BACKGROUND"); bg:SetAllPoints(); bg:SetColorTexture(O.r, O.g, O.b, 0.1)
+  g.label = newText(g, FONT.label, 11, O, "LEFT"); g.label:SetPoint("TOPLEFT", 12, -12)
+  g.rem = flatButton(g, 20, 20, O, "X", 11); g.rem:SetBase(0.5); g.rem:SetPoint("TOPRIGHT", -8, -8)
+  g.rem:SetScript("OnClick", function() C:TrigRemove(g._ti, nil) end)
+  local ml = newText(g, FONT.label, 11, { r = 1, g = 1, b = 1 }, "LEFT"); ml:SetPoint("TOPLEFT", 150, -13); ml:SetText("Match:")
+  g.mpills = {}
+  local mx = 194
+  for _, lg in ipairs(TRIG_LOGICS) do
+    local logic, w = lg[1], ({ ALL = 34, ANY = 37, NONE = 48 })[lg[2]] or 40
+    local mp = CreateFrame("Button", nil, g); mp:SetSize(w, 20); mp:SetPoint("TOPLEFT", mx, -11); mx = mx + w + 6
+    mp.fill = mp:CreateTexture(nil, "BACKGROUND"); mp.fill:SetAllPoints(); mp.fill:SetColorTexture(O.r, O.g, O.b, 0.8)
+    mp.edges = addEdges(mp, { r = O.r, g = O.g, b = O.b, a = 1 }, 1)
+    local ll = newText(mp, FONT.label, 11, { r = 1, g = 1, b = 1 }, "CENTER"); ll:SetPoint("CENTER"); ll:SetText(lg[2])
+    mp._logic = logic
+    mp:SetScript("OnClick", function()
+      local grp = C:TrigNode(g._ti); if not grp then return end
+      grp.logic = logic
+      if GA.CDM then GA.CDM:RefreshDisplays() end
+      C:TrigRender()
+    end)
+    g.mpills[#g.mpills + 1] = mp
+  end
+  g.add = flatButton(g, 100, 22, O, "+ Add to Group", 11); g.add:SetBase(0.35)
+  g.add:SetScript("OnClick", function() C:TrigAddToExistingGroup(g._ti) end)
+  g._rows = {}
+  return g
+end
+
+function C:FillTrigGroupBox(g, ti, n, group)
+  g._ti = ti
+  g.label:SetText("TRIGGER GROUP " .. n)
+  for _, mp in ipairs(g.mpills) do
+    local sel = (mp._logic == (group.logic or "OR"))
+    mp.fill:SetShown(sel); mp:SetAlpha(sel and 1 or 0.5)
+    for _, key in ipairs({ "top", "bottom", "left", "right" }) do mp.edges[key]:SetShown(not sel) end
+  end
+  local pitch, headerH = 30, 36
+  local leaves = group.conditions or {}
+  for i, leaf in ipairs(leaves) do
+    local row = g._rows[i]; if not row then row = C:MakeTrigRow(g); g._rows[i] = row end
+    C:FillTrigRow(row, ti, i, leaf)
+    row:ClearAllPoints(); row:SetPoint("TOPRIGHT", -8, -(headerH + (i - 1) * pitch)); row:Show()
+  end
+  for i = #leaves + 1, #g._rows do g._rows[i]:Hide() end
+  local h = headerH + #leaves * pitch + 6 + 22 + 6   -- rows + gap + "+ Add to Group" bar
+  g:SetHeight(h)
+  g.add:ClearAllPoints(); g.add:SetPoint("BOTTOMLEFT", 8, 6); g.add:SetPoint("BOTTOMRIGHT", -8, 6)
+  return h
+end
+
+function C:BuildTriggerSection(ct)
+  local H = COLOR.heroic
+  C._trigUI = { pills = {}, rows = {}, groups = {}, selected = {} }
+
+  -- Match ALL / ANY / NONE segmented control (sets the top-level logic).
+  for i, lg in ipairs(TRIG_LOGICS) do
+    local logic = lg[1]
+    local pill = flatButton(ct, 113, 28, H, "", 11); pill:SetBase(0.5); pill.text:Hide()
+    pill:SetPoint("TOPLEFT", (i - 1) * 123, 0)
+    pill._logic = logic; pill._lbl = twoWeightLabel(pill, 11); pill._lbl:Set("Match", lg[2])
+    pill:SetScript("OnClick", function()
+      local t = C:TrigTree(); if not t then return end
+      t.logic = logic
+      if GA.CDM then GA.CDM:RefreshDisplays() end
+      C:TrigRender()
+    end)
+    C._trigUI.pills[i] = pill
+  end
+
+  -- Bordered trigger box (heroic@0.05 fill + purple@0.2 border), dynamic height.
+  local box = CreateFrame("Frame", nil, ct); box:SetPoint("TOPLEFT", 0, -48); box:SetSize(360, 66)
+  local bbg = box:CreateTexture(nil, "BACKGROUND"); bbg:SetAllPoints(); bbg:SetColorTexture(H.r, H.g, H.b, 0.05)
+  addEdges(box, { r = COLOR.purple.r, g = COLOR.purple.g, b = COLOR.purple.b, a = 0.2 }, 1)
+  C._trigUI.box = box
+
+  -- "Add a Trigger" bar (bottom of the box).
+  local addBar = flatButton(box, 360, 28, H, "Add a TRIGGER", 11); addBar:SetBase(0.5)
+  setFont(addBar.text, FONT.label, 11)
+  addBar:SetPoint("BOTTOMLEFT", 0, 0); addBar:SetPoint("BOTTOMRIGHT", 0, 0)
+  addBar:SetScript("OnClick", function() OpenPicker(function(item) C:TrigAddLeaf(item, nil) end) end)
+  C._trigUI.addBar = addBar
+
+  -- "Add to Trigger Group" bar (below the box) + shift-click hint.
+  local addG = flatButton(ct, 360, 28, H, "", 11); addG:SetBase(0.5); addG.text:Hide()
+  addG._lbl = twoWeightLabel(addG, 11); addG._lbl:Set("Add to", "TRIGGER GROUP")
+  addG:SetScript("OnClick", function() C:TrigAddToGroup() end)
+  C._trigUI.addGroup = addG
+  local hint = newText(ct, FONT.body, 11, MUTE, "CENTER"); hint:SetWidth(360)
+  hint:SetText("Shift-click multiple condition names above to add to a group")
+  C._trigUI.hint = hint
+end
+
+-- "Add to Trigger Group": move shift-selected TOP-LEVEL conditions into a new group;
+-- with nothing selected, create an empty group and pick its first condition.
+function C:TrigAddToGroup()
+  local cfg = C:TrigCfg(); if not cfg then return end
+  local t = C:TrigTree(); if not t then return end
+  local sel = C._trigUI.selected
+  local moving, keep = {}, {}
+  for _, node in ipairs(t.conditions) do
+    if (not node.conditions) and sel[node] then moving[#moving + 1] = node else keep[#keep + 1] = node end
+  end
+  if #moving == 0 then
+    C:TrigAddGroup()
+    local gi = #C:TrigTree().conditions
+    OpenPicker(function(item) C:TrigAddLeaf(item, gi) end)
+    return
+  end
+  keep[#keep + 1] = { logic = "OR", conditions = moving }
+  t.conditions = keep
+  wipe(C._trigUI.selected)
+  self:TrigRebind()
+end
+
+-- Add to an EXISTING group (its "+ Add to Group" button): move the shift-selection into
+-- this group, or — with nothing selected — pick a new condition straight into it.
+function C:TrigAddToExistingGroup(ti)
+  local t = C:TrigTree(); if not t then return end
+  local group = t.conditions[ti]; if not (group and group.conditions) then return end
+  local sel = C._trigUI.selected
+  local moving = {}
+  for _, node in ipairs(t.conditions) do
+    if (not node.conditions) and sel[node] then moving[#moving + 1] = node end
+  end
+  if #moving == 0 then
+    OpenPicker(function(item) C:TrigAddLeaf(item, ti) end)   -- add a fresh condition to this group
+    return
+  end
+  local keep = {}
+  for _, node in ipairs(t.conditions) do
+    if not ((not node.conditions) and sel[node]) then keep[#keep + 1] = node end
+  end
+  for _, node in ipairs(moving) do table.insert(group.conditions, node) end   -- group is a live ref
+  t.conditions = keep
+  wipe(C._trigUI.selected)
+  self:TrigRebind()
+end
+
+-- Render the current aura's trigger tree (top-level leaves + nested group boxes) + size.
+function C:TrigInlineRender()
+  local ui = C._trigUI; if not ui then return end
+  local cfg = C:TrigCfg()
+  if not cfg then C:AccordionSetHeight("trigger", 40); return end
+  local t = cfg.trigger                          -- may be nil — DON'T auto-create by viewing
+  local logic = (t and t.logic) or "AND"
+  local conditions = (t and t.conditions) or {}
+
+  for _, pill in ipairs(ui.pills) do
+    local sel = (pill._logic == logic)
+    pill:SetBase(sel and 0.8 or 0.5); pill:SetAlpha(sel and 1 or 0.5)
+  end
+
+  local topPad, pitch, gap = 12, 30, 8
+  local y, nr, ng = topPad, 0, 0
+  for ti, node in ipairs(conditions) do
+    if node.conditions then
+      ng = ng + 1
+      local gbox = ui.groups[ng]; if not gbox then gbox = C:MakeTrigGroupBox(ui.box); ui.groups[ng] = gbox end
+      local gh = C:FillTrigGroupBox(gbox, ti, ng, node)
+      gbox:ClearAllPoints(); gbox:SetPoint("TOPLEFT", 0, -y); gbox:SetPoint("TOPRIGHT", 0, -y); gbox:Show()
+      y = y + gh + gap
+    else
+      nr = nr + 1
+      local row = ui.rows[nr]; if not row then row = C:MakeTrigRow(ui.box); ui.rows[nr] = row end
+      C:FillTrigRow(row, ti, nil, node)
+      row:ClearAllPoints(); row:SetPoint("TOPRIGHT", -8, -y); row:Show()
+      y = y + pitch
+    end
+  end
+  for i = nr + 1, #ui.rows do ui.rows[i]:Hide() end
+  for i = ng + 1, #ui.groups do ui.groups[i]:Hide() end
+
+  local boxH = y + gap + 28   -- content + gap + Add-a-Trigger bar
+  ui.box:SetHeight(boxH)
+  ui.addGroup:ClearAllPoints()
+  ui.addGroup:SetPoint("TOPLEFT", 0, -(48 + boxH + 10)); ui.addGroup:SetPoint("TOPRIGHT", 0, -(48 + boxH + 10))
+  ui.hint:ClearAllPoints(); ui.hint:SetPoint("TOP", 0, -(48 + boxH + 10 + 28 + 8))
+
+  C:AccordionSetHeight("trigger", 48 + boxH + 10 + 28 + 8 + 15)   -- box + AddToGroup + hint
+end
+
+-- Inline TEXT section (redesign). Content field + Show/Charge toggles + Font pill +
+-- Text Color + Size + Outline/Anchor + X/Y. Reuses the shipped text engine (cfg.text,
+-- OpenFontPicker, TE_OUTLINE/TE_ANCHOR); reads are NON-seeding (so merely viewing the
+-- section never creates cfg.text) while writes seed it.
+function C:BuildTextSection(ct)
+  local H = COLOR.heroic
+  local function txt() local c = Cfg(); return c and c.text end                          -- read, no seed
+  local function ensure() local c = Cfg(); if not c then return nil end
+    if not c.text then c.text = { show = (c.showLabel ~= false) } end; return c.text end  -- write, seeds
+
+  -- Content field (heroic-8%, placeholder = the aura's name).
+  local cf = CreateFrame("EditBox", nil, ct); cf:SetSize(360, 28); cf:SetPoint("TOPLEFT", 0, 0)
+  cf:SetAutoFocus(false); setFont(cf, FONT.body, 13); cf:SetTextColor(1, 1, 1); cf:SetTextInsets(10, 10, 0, 0)
+  local cbg = cf:CreateTexture(nil, "BACKGROUND"); cbg:SetAllPoints(); cbg:SetColorTexture(H.r, H.g, H.b, 0.08)
+  local cph = newText(cf, FONT.body, 13, TEXT, "LEFT"); cph:SetPoint("LEFT", 10, 0); cph:SetAlpha(0.3); cph:SetText("Text (blank = the aura's name)")
+  local function cUpd() cph:SetShown((cf:GetText() or "") == "") end
+  cf:SetScript("OnTextChanged", cUpd)
+  cf:SetScript("OnEnterPressed", function(self) local t = ensure(); if t then local s = self:GetText(); t.str = (s ~= "" and s) or nil; ReapplySelected() end; self:ClearFocus() end)
+  cf:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  rows[#rows + 1] = { refresh = function() local t = txt(); cf:SetText((t and t.str) or ""); cf:SetCursorPosition(0); cUpd() end,
+                      setEnabled = function(_, on) cf:SetEnabled(on) end }
+
+  -- Show Text + Show Charge Count toggles (one row).
+  local sLbl = newText(ct, FONT.body, 11, { r = 1, g = 1, b = 1 }, "LEFT"); sLbl:SetPoint("TOPLEFT", 0, -50); sLbl:SetText("Show Text Above")
+  local sTog = makeToggle(ct,
+    function() local c = Cfg(); if not c then return false end; local t = c.text; if t then return t.show ~= false end; return c.showLabel ~= false end,
+    function(v) local t = ensure(); if t then t.show = v; ReapplySelected() end end)
+  sTog:SetPoint("TOPLEFT", 94, -48)
+  rows[#rows + 1] = { refresh = function() sTog:refresh() end, setEnabled = function() end }
+
+  local cLbl = newText(ct, FONT.body, 11, { r = 1, g = 1, b = 1 }, "LEFT"); cLbl:SetPoint("TOPLEFT", 150, -50); cLbl:SetText("Show Charge Count")
+  local cTog = makeToggle(ct,
+    function() local t = txt(); return t and t.showCount == true end,
+    function(v) local t = ensure(); if t then t.showCount = v or nil; if v then t.show = true; sTog:refresh() end; ReapplySelected() end end)
+  cTog:SetPoint("TOPLEFT", 258, -48)
+  rows[#rows + 1] = { refresh = function() cTog:refresh() end, setEnabled = function() end }
+
+  -- Font pill + Text Color.
+  local fb = flatButton(ct, 220, 28, H, "", 11); fb:SetBase(0.5); fb.text:Hide(); fb:SetPoint("TOPLEFT", 0, -88)
+  local fLbl = twoWeightLabel(fb, 11)
+  fb:SetScript("OnClick", function()
+    local t = txt()
+    OpenFontPicker(function(path) local t2 = ensure(); if t2 then t2.font = path; ReapplySelected(); fLbl:Set("Font:", fontNameFor(path)) end end, t and t.font)
+  end)
+  rows[#rows + 1] = { refresh = function() local t = txt(); fLbl:Set("Font:", fontNameFor(t and t.font)) end, setEnabled = function(_, on) fb:SetEnabled(on) end }
+
+  rows[#rows + 1] = MakeColor(ct, 239, -91,
+    function() local t = txt(); return t and t.color end,
+    function(v) local t = ensure(); if t then t.color = v end end, "Text Color")
+
+  -- Size (max well above the old 48 so big display text is possible; type an exact value too).
+  rows[#rows + 1] = MakeSlider(ct, -136, "Size", 6, 300, 1,
+    function() local t = txt(); return t and t.size or 14 end,
+    function(v) local t = ensure(); if t then t.size = v end end)
+
+  -- Outline + Anchor.
+  rows[#rows + 1] = MakeDropdown(ct, 0, -176, 175, "Outline:", TE_OUTLINE,
+    function() local t = txt(); return (t and t.outline) or "OUTLINE" end,
+    function(v) local t = ensure(); if t then t.outline = (v ~= "OUTLINE") and v or nil end end)
+  rows[#rows + 1] = MakeDropdown(ct, 185, -176, 175, "Anchor:", TE_ANCHOR,
+    function() local t = txt(); return (t and t.anchor) or "BOTTOM" end,
+    function(v) local t = ensure(); if t then t.anchor = (v ~= "BOTTOM") and v or nil end end)
+
+  -- X / Y offset.
+  rows[#rows + 1] = MakeSlider(ct, -224, "X Offset", -400, 400, 2,
+    function() local t = txt(); return t and t.x or 0 end,
+    function(v) local t = ensure(); if t then t.x = (v ~= 0) and v or nil end end)
+  rows[#rows + 1] = MakeSlider(ct, -257, "Y Offset", -400, 400, 2,
+    function() local t = txt(); return t and t.y or 0 end,
+    function(v) local t = ensure(); if t then t.y = (v ~= 0) and v or nil end end)
+end
+
+-- Inline EFFECTS & MOTION section (redesign). Glow only for now (Motion parked — low
+-- priority). Reuses the shipped glow engine (cfg.glow + Displays ApplyGlow via ReapplySelected).
+function C:BuildEffectsSection(ct)
+  local GLOW = { { "none", "None" }, { "autocast", "Autocast Shine" }, { "pixel", "Pixel Glow" },
+                 { "proc", "Proc Glow" }, { "button", "Action Button Glow" } }
+  rows[#rows + 1] = MakeDropdown(ct, 0, 0, 220, "Glow:", GLOW,
+    function() local c = Cfg(); return (c and c.glow and c.glow.type) or "none" end,
+    function(v) local c = Cfg(); if not c then return end; c.glow = c.glow or {}; c.glow.type = (v ~= "none") and v or nil end)
+  rows[#rows + 1] = MakeColor(ct, 239, -4,
+    function() local c = Cfg(); return c and c.glow and c.glow.customColor and c.glow.color end,
+    function(v) local c = Cfg(); if not c then return end; c.glow = c.glow or {}; c.glow.color = v; c.glow.customColor = (v ~= nil) or nil end,
+    "Custom Color")
+  local hint = newText(ct, FONT.body, 11, MUTE, "LEFT"); hint:SetPoint("TOPLEFT", 0, -44); hint:SetWidth(360); hint:SetJustifyH("LEFT")
+  hint:SetText("Glow shows while the aura is on screen. Custom Color off = the glow's own colour.")
+end
+
 local function Build()
   local p = CreateFrame("Frame", "GloomsAurasConfig", UIParent)
   p:SetSize(PANEL_W, PANEL_H); p:SetPoint("CENTER"); p:SetFrameStrata("DIALOG"); p:EnableMouse(true)
   skinPlate(p)
+  -- Warm bottom glow — Figma: linear-gradient(transparent 40% → rgba(255,119,41,0.12) 100%).
+  -- A white texture over the bottom 60%, vertex-gradient tinted orange, fading in downward.
+  local glow = p:CreateTexture(nil, "BACKGROUND", nil, 1)
+  glow:SetColorTexture(1, 1, 1, 1)
+  glow:SetPoint("TOPLEFT", 0, -PANEL_H * 0.4); glow:SetPoint("BOTTOMRIGHT", 0, 0)
+  local go = COLOR.orange
+  glow:SetGradient("VERTICAL", CreateColor(go.r, go.g, go.b, 0.12), CreateColor(go.r, go.g, go.b, 0))
 
-  local title = newText(p, FONT.title, 20, COLOR.purple, "LEFT")
-  title:SetPoint("TOPLEFT", INSET, -8); title:SetText("Gloom's Auras")
+  -- No window-title text in the redesign (the editor's aura-name bar is its heading).
+  -- Keep a small X close in the top-right corner, lifted above the landing layer so
+  -- it stays clickable in both states.
+  local close = flatButton(p, 20, 18, COLOR.heroic, "X", 12)
+  close:SetPoint("TOPRIGHT", -6, -6); close:SetScript("OnClick", function() p:Hide() end)
+  close:SetFrameLevel(p:GetFrameLevel() + 20)
 
-  local close = flatButton(p, 22, 20, COLOR.heroic, "X", 12)
-  close:SetPoint("TOPRIGHT", -8, -8); close:SetScript("OnClick", function() p:Hide() end)
-
-  -- Movable title bar (grab the title strip, drag, release).
+  -- Movable via an invisible strip across the top (no visible title bar now).
   p:SetMovable(true); p:SetClampedToScreen(true)
   local titlebar = CreateFrame("Frame", nil, p)
   titlebar:SetPoint("TOPLEFT", 2, -2); titlebar:SetPoint("TOPRIGHT", -34, -2); titlebar:SetHeight(TITLEBAR_H - 4)
   titlebar:EnableMouse(true); titlebar:RegisterForDrag("LeftButton")
-  local tbbg = titlebar:CreateTexture(nil, "BACKGROUND"); tbbg:SetAllPoints(); tbbg:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.14)
   titlebar:SetScript("OnDragStart", function() p:StartMoving() end)
   titlebar:SetScript("OnDragStop", function() p:StopMovingOrSizing(); C:SavePanelPos() end)
 
-  -- Vertical divider between the list and the editor.
+  -- Vertical divider between the list and the editor — runs from the top down to the
+  -- footer divider (Figma: x=220, full content height).
   local divider = p:CreateTexture(nil, "ARTWORK")
   divider:SetColorTexture(COLOR.rim.r, COLOR.rim.g, COLOR.rim.b, COLOR.rim.a)
-  divider:SetPoint("TOPLEFT", INSET + LIST_W + 7, CONTENT_TOP + 2)
-  divider:SetPoint("BOTTOMLEFT", INSET + LIST_W + 7, PANEL_H - PANE_H - (TITLEBAR_H + 8) + 2)
+  divider:SetPoint("TOPLEFT", DIVIDER_X, -2)
+  divider:SetPoint("BOTTOMLEFT", DIVIDER_X, FOOTER_H)
   divider:SetWidth(1)
 
   -- ---- LEFT PANE: the aura list ----
   listFrame = CreateFrame("Frame", nil, p)
-  listFrame:SetPoint("TOPLEFT", INSET, CONTENT_TOP); listFrame:SetSize(LIST_W, PANE_H)
+  listFrame:SetPoint("TOPLEFT", PAD_L, CONTENT_TOP); listFrame:SetSize(LIST_W, PANE_H)
   listFrame:EnableMouse(true); listFrame:EnableMouseWheel(true)
   listFrame:SetScript("OnMouseWheel", function(_, delta) listOffset = listOffset - delta; RefreshList() end)
 
@@ -2623,262 +3375,25 @@ local function Build()
     listRows[i] = row
   end
 
-  -- Button stack at the bottom of the left pane: Add / Duplicate / Remove.
-  -- Add creates a BLANK aura (appearance-first): a placeholder graphic you then name,
-  -- style, and (optionally) point at spells via the Trigger. No trigger = a decoration
-  -- that's always shown (gate it with Visibility). Spells enter ONLY via the Trigger.
-  local addBtn = flatButton(listFrame, LIST_W, 26, COLOR.purple, "+ Add Aura", 13)
-  addBtn:SetPoint("BOTTOMLEFT", 0, 56)
-  addBtn:SetScript("OnClick", function()
-    local db = DB(); if not db then return end
-    local id = NewDisplayID()
-    db[id] = {
-      label = "New Aura", enabled = true, width = 64, height = 64,
-      point = { "CENTER", 0, 120 }, alpha = 1, showLabel = false,
-      texture = MEDIA .. "Textures\\Circle_Smooth",   -- neutral placeholder; swap via Choose…
-      -- no spellID + no trigger ⇒ decoration (always shown, gated by Visibility/Group)
-    }
-    if GA.CDM then GA.CDM:Discover() end
-    SetSelected(id)
-  end)
+  -- Left-pane button stack (New / Duplicate / Delete / Group) — see C:BuildLeftButtons.
+  C:BuildLeftButtons(listFrame)
 
-  -- Duplicate: an exact copy of the selected aura (same tracked spell), nudged so
-  -- it doesn't sit exactly on top of the original. New display gets a unique id.
-  local dupBtn = flatButton(listFrame, LIST_W, 26, COLOR.heroic, "Duplicate Aura", 13)
-  dupBtn:SetPoint("BOTTOMLEFT", 0, 28)
-  dupBtn:SetScript("OnClick", function()
-    if not (selectedID and DB() and DB()[selectedID]) then return end
-    local copy = DeepCopy(DB()[selectedID])
-    copy.label = (copy.label or "Aura") .. " (copy)"
-    local p = copy.point or { "CENTER", 0, 0 }
-    copy.point = { "CENTER", (p[2] or 0) + 24, (p[3] or 0) - 24 }
-    local id = NewDisplayID()
-    DB()[id] = copy
-    if GA.CDM then GA.CDM:Discover() end
-    SetSelected(id)
-  end)
-
-  local removeBtn = flatButton(listFrame, LIST_W, 26, COLOR.orange, "Remove Aura", 13)
-  removeBtn:SetPoint("BOTTOMLEFT", 0, 0)
-  removeBtn:SetScript("OnClick", function()
-    if selectedID and DB() then
-      local gone = selectedID
-      DB()[gone] = nil
-      if GA.Displays and GA.Displays.frames[gone] then GA.Displays.frames[gone]:Hide() end
-      if GA.CDM then GA.CDM:Discover() end
-      SetSelected(DisplayList()[1])
-    end
-  end)
-
-  -- ---- RIGHT PANE: the settings editor ----
+  -- ---- RIGHT PANE: the settings editor (redesign accordion — see C:BuildEditor) ----
   local editor = CreateFrame("Frame", nil, p)
   editor:SetPoint("TOPLEFT", EDITOR_X, CONTENT_TOP); editor:SetSize(EDITOR_W, PANE_H)
+  C._editor = editor   -- so the landing/editor mode switch can toggle it
+  C:BuildEditor(editor)
 
-  -- Editable aura name (click the title, type, Enter to rename). A plain EditBox
-  -- styled like the title; a faint fill on focus signals it's editable. Renaming
-  -- updates the left-pane list + the on-screen label (when the label uses the name).
-  editorName = CreateFrame("EditBox", nil, editor)
-  editorName:SetPoint("TOPLEFT", 10, -2); editorName:SetPoint("RIGHT", -8, 0); editorName:SetHeight(26)
-  editorName:SetAutoFocus(false); editorName:SetTextInsets(4, 4, 0, 0)
-  setFont(editorName, FONT.title, 18); editorName:SetTextColor(TEXT.r, TEXT.g, TEXT.b)
-  -- Always-faint fill so it reads as an editable field (like the Texture path box);
-  -- brightens on focus. A small pencil hint on the right reinforces "click to rename".
-  local nameBG = editorName:CreateTexture(nil, "BACKGROUND"); nameBG:SetAllPoints()
-  nameBG:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.08)
-  editorName:SetScript("OnEditFocusGained", function() nameBG:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.18) end)
-  editorName:SetScript("OnEditFocusLost", function() nameBG:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 0.08) end)
-  local nameHint = newText(editorName, FONT.body, 11, MUTE, "RIGHT")
-  nameHint:SetPoint("RIGHT", -6, 0); nameHint:SetText("click to rename")
-  editorName:SetScript("OnEnterPressed", function(self)
-    local c = Cfg()
-    if c then local txt = self:GetText(); if txt and txt:gsub("%s", "") ~= "" then c.label = txt end end
-    self:ClearFocus()
-    local c2 = Cfg(); self:SetText((c2 and c2.label) or "")
-    RefreshList(); ReapplySelected()
-  end)
-  editorName:SetScript("OnEscapePressed", function(self) local c = Cfg(); self:SetText((c and c.label) or ""); self:ClearFocus() end)
+  -- ---- Footer strip (shared by the landing + the editor) ----
+  -- Horizontal divider above the footer controls (Figma).
+  local footDiv = p:CreateTexture(nil, "ARTWORK")
+  footDiv:SetColorTexture(COLOR.rim.r, COLOR.rim.g, COLOR.rim.b, COLOR.rim.a)
+  footDiv:SetPoint("BOTTOMLEFT", 0, FOOTER_H); footDiv:SetPoint("BOTTOMRIGHT", 0, FOOTER_H); footDiv:SetHeight(1)
 
-  Header(editor, 12, -30, "Texture")
-  -- Path field is narrowed so the "Choose…" button sits inline to its right (same
-  -- row, matching height). No preview swatch — the aura itself is visible in-game.
-  rows[#rows + 1] = MakeText(editor, -52, "Texture",
-    function() local c = Cfg(); return c and c.texture end,
-    function(v) local c = Cfg(); if c then c.texture = v; RefreshList() end end, 248)
-
-  local chooseBtn = flatButton(editor, 82, 20, COLOR.heroic, "Choose…", 12)
-  chooseBtn:SetPoint("TOPLEFT", 276, -70)   -- inline with the path field (its row = yOff-18)
-  chooseBtn:SetScript("OnClick", function()
-    local c = Cfg(); if not c then return end
-    OpenTexturePicker(function(tex)
-      c.texture = tex
-      ReapplySelected()
-      C:RefreshCurrent()   -- refresh the path box
-      RefreshList()        -- update the left-pane mini-icon to the new texture
-    end, c.texture)
-  end)
-  rows[#rows + 1] = { refresh = function() end, setEnabled = function(_, on) chooseBtn:SetEnabled(on) end }
-
-  -- Tint + Desaturate row.
-  rows[#rows + 1] = MakeColor(editor, 16, -96,
-    function() local c = Cfg(); return c and c.color end,
-    function(v) local c = Cfg(); if c then c.color = v end end)
-  local desat = flatCheck(editor, "Desaturate"); desat:SetPoint("TOPLEFT", 190, -96)
-  desat:SetScript("OnClick", function()
-    local c = Cfg(); if not c then return end
-    desat:Set(not desat:Get()); c.desaturate = desat:Get() or nil; ReapplySelected()
-  end)
-  rows[#rows + 1] = { refresh = function() local c = Cfg(); desat:Set(c and c.desaturate) end,
-                      setEnabled = function(_, on) desat:SetEnabled(on) end }
-
-  -- Blend mode + Frame strata row (dropdown menus).
-  rows[#rows + 1] = MakeDropdown(editor, 16, -122, 150, "Blend: ", BLEND_MODES,
-    function() local c = Cfg(); return (c and c.blend) or "BLEND" end,
-    function(v) local c = Cfg(); if c then c.blend = (v ~= "BLEND") and v or nil end end)
-  rows[#rows + 1] = MakeDropdown(editor, 190, -122, 150, "Strata: ", STRATA_MODES,
-    function() local c = Cfg(); return (c and c.strata) or "HIGH" end,
-    function(v) local c = Cfg(); if c then c.strata = (v ~= "HIGH") and v or nil end end)
-
-  rows[#rows + 1] = MakeSlider(editor, -150, "Alpha %", 0, 100, 5,
-    function() local c = Cfg(); return c and ((c.alpha or 1) * 100) end,
-    function(v) local c = Cfg(); if c then c.alpha = v / 100 end end)
-
-  Header(editor, 12, -186, "Position and Size")
-  -- Width/Height are cross-linked when the aspect lock is engaged: changing one
-  -- scales the other by cfg.aspect (the w/h ratio captured when the lock was set).
-  local widthRow, heightRow
-  local function clampDim(n) return math.max(8, math.min(8192, math.floor(n + 0.5))) end
-  widthRow = MakeSlider(editor, -212, "Width", 8, 8192, 2,
-    function() local c = Cfg(); return c and (c.width or c.size) end,
-    function(v)
-      local c = Cfg(); if not c then return end
-      c.width = v
-      if c.lockAspect then
-        c.height = clampDim(v / (c.aspect or 1))
-        if heightRow then heightRow:refresh() end
-      end
-    end)
-  rows[#rows + 1] = widthRow
-  heightRow = MakeSlider(editor, -244, "Height", 8, 8192, 2,
-    function() local c = Cfg(); return c and (c.height or c.size) end,
-    function(v)
-      local c = Cfg(); if not c then return end
-      c.height = v
-      if c.lockAspect then
-        c.width = clampDim(v * (c.aspect or 1))
-        if widthRow then widthRow:refresh() end
-      end
-    end)
-  rows[#rows + 1] = heightRow
-
-  -- Aspect-ratio lock: a thin 1px bracket in the right margin whose two arms point
-  -- at the Width & Height boxes (starting past their edge so they don't overlap),
-  -- joined by a short spine with the padlock sitting on it.
-  local BRP, BRA = COLOR.purple, 0.6
-  local brTop = editor:CreateTexture(nil, "ARTWORK"); brTop:SetColorTexture(BRP.r, BRP.g, BRP.b, BRA)
-  brTop:SetPoint("TOPLEFT", 357, -220); brTop:SetSize(5, 1)     -- arm at the Width box centerline
-  local brBot = editor:CreateTexture(nil, "ARTWORK"); brBot:SetColorTexture(BRP.r, BRP.g, BRP.b, BRA)
-  brBot:SetPoint("TOPLEFT", 357, -252); brBot:SetSize(5, 1)     -- arm at the Height box centerline
-  local brSpine = editor:CreateTexture(nil, "ARTWORK"); brSpine:SetColorTexture(BRP.r, BRP.g, BRP.b, BRA)
-  brSpine:SetPoint("TOPLEFT", 361, -220); brSpine:SetSize(1, 33)  -- joins the two arms
-
-  local aspectBtn = CreateFrame("Button", nil, editor)
-  aspectBtn:SetSize(14, 14); aspectBtn:SetPoint("LEFT", brSpine, "RIGHT", 0, 0)
-  local alock = aspectBtn:CreateTexture(nil, "ARTWORK"); alock:SetAllPoints()
-  -- Jason's custom lock icons (Media/lock_locked.png / lock_unlocked.png) with colors
-  -- baked in — no tint, just swap the texture by state (white vertex = show as-authored).
-  local LOCK_ON, LOCK_OFF = MEDIA .. "lock_locked.png", MEDIA .. "lock_unlocked.png"
-  local function alockRefresh()
-    local c = Cfg(); local on = c and c.lockAspect
-    alock:SetTexture(on and LOCK_ON or LOCK_OFF)
-    alock:SetVertexColor(1, 1, 1, 1)
-  end
-  aspectBtn:SetScript("OnClick", function()
-    local c = Cfg(); if not c then return end
-    local on = not c.lockAspect
-    c.lockAspect = on or nil
-    if on then
-      local w, h = (c.width or c.size or 64), (c.height or c.size or 64)
-      c.aspect = (h > 0) and (w / h) or 1
-    end
-    alockRefresh()
-  end)
-  rows[#rows + 1] = {
-    refresh = alockRefresh,
-    setEnabled = function(_, on) aspectBtn:SetEnabled(on); alock:SetDesaturated(not on) end,
-  }
-  rows[#rows + 1] = MakeSlider(editor, -276, "X Offset", -2000, 2000, 5,
-    function() local c = Cfg(); return c and c.point and c.point[2] end,
-    function(v) local c = Cfg(); if c then c.point = { "CENTER", v, (c.point and c.point[3]) or 0 } end end)
-  rows[#rows + 1] = MakeSlider(editor, -308, "Y Offset", -2000, 2000, 5,
-    function() local c = Cfg(); return c and c.point and c.point[3] end,
-    function(v) local c = Cfg(); if c then c.point = { "CENTER", (c.point and c.point[2]) or 0, v } end end)
-
-  Header(editor, 12, -344, "Trigger & Visibility")
-  local trigBtn = flatButton(editor, 110, 24, COLOR.heroic, "Edit Trigger…", 12)
-  trigBtn:SetPoint("TOPLEFT", 16, -368)
-  trigBtn:SetScript("OnClick", function() if selectedID then C:OpenTriggerEditor(selectedID) end end)
-  triggerSummary = newText(editor, FONT.body, 12, TEXT, "LEFT")
-  triggerSummary:SetPoint("LEFT", trigBtn, "RIGHT", 10, 0); triggerSummary:SetWidth(EDITOR_W - 150); triggerSummary:SetJustifyH("LEFT")
-
-  local visBtn = flatButton(editor, 110, 24, COLOR.heroic, "Visibility…", 12)
-  visBtn:SetPoint("TOPLEFT", 16, -400)
-  visBtn:SetScript("OnClick", function() if selectedID then OpenVisibilityEditor(selectedID) end end)
-  visibilitySummary = newText(editor, FONT.body, 12, TEXT, "LEFT")
-  visibilitySummary:SetPoint("LEFT", visBtn, "RIGHT", 10, 0); visibilitySummary:SetWidth(EDITOR_W - 150); visibilitySummary:SetJustifyH("LEFT")
-
-  Header(editor, 12, -434, "Sound & Text")
-  local soundBtn = flatButton(editor, 150, 22, COLOR.heroic, "None", 12)
-  soundBtn:SetPoint("TOPLEFT", 16, -458)
-  local function soundLabel() local c = Cfg(); return (c and c.sound and c.sound.name) or "None" end
-  soundBtn:SetScript("OnClick", function()
-    local c = Cfg(); if not c then return end
-    OpenSoundPicker(function(item)
-      if item.file then c.sound = { file = item.file, name = item.name, channel = "Master" }
-      else c.sound = nil end
-      soundBtn:SetText(soundLabel())
-    end, c.sound and c.sound.file)
-  end)
-  local testBtn = flatButton(editor, 52, 22, COLOR.heroic, "Test", 12)
-  testBtn:SetPoint("LEFT", soundBtn, "RIGHT", 8, 0)
-  testBtn:SetScript("OnClick", function()
-    local c = Cfg(); if c and c.sound and c.sound.file then pcall(PlaySoundFile, c.sound.file, c.sound.channel or "Master") end
-  end)
-  local textBtn = flatButton(editor, 74, 22, COLOR.heroic, "Text…", 12)
-  textBtn:SetPoint("LEFT", testBtn, "RIGHT", 8, 0)
-  textBtn:SetScript("OnClick", function() if selectedID then OpenTextEditor(selectedID) end end)
-  rows[#rows + 1] = {
-    refresh = function() soundBtn:SetText(soundLabel()) end,
-    setEnabled = function(_, on) soundBtn:SetEnabled(on); testBtn:SetEnabled(on); textBtn:SetEnabled(on) end,
-  }
-
-  -- GROUP section (assign dropdown + on/off switch + load rule + delete) — built in
-  -- its own function to keep Build under Lua 5.1's 60-upvalue limit.
-  BuildGroupSection(editor)
-
-  -- EFFECTS section: drawer-based effect editors (Glow now; Motion/Frame later share
-  -- this row). The Glow… button opens the docked glow drawer (C:OpenGlowEditor).
-  Header(editor, 12, -566, "Effects")
-  local glowBtn = flatButton(editor, 110, 24, COLOR.heroic, "Glow…", 12)
-  glowBtn:SetPoint("TOPLEFT", 16, -590)
-  glowBtn:SetScript("OnClick", function() if selectedID then C:OpenGlowEditor(selectedID) end end)
-  local glowSummary = newText(editor, FONT.body, 12, TEXT, "LEFT")
-  glowSummary:SetPoint("LEFT", glowBtn, "RIGHT", 10, 0); glowSummary:SetWidth(EDITOR_W - 150); glowSummary:SetJustifyH("LEFT")
-  rows[#rows + 1] = {
-    refresh = function()
-      local c = Cfg(); local g = c and c.glow
-      local names = { autocast = "Autocast Shine", pixel = "Pixel Glow", proc = "Proc Glow", button = "Action Button Glow" }
-      local n = g and g.type and names[g.type]
-      glowSummary:SetText(n and ("|cffffffff" .. n .. "|r") or "|cff888888none|r")
-    end,
-    setEnabled = function(_, on) glowBtn:SetEnabled(on) end,
-  }
-
-  -- (Remove button lives under "+ Add aura" in the left pane — see below.)
-
-  -- ---- Global option (bottom strip): hide Blizzard's own Cooldown Manager ----
-  -- Drives viewer alpha only (not Hide()), so our state mirror keeps working.
-  local hideCDM = flatCheck(p, "Hide Blizzard's Cooldown Manager (tracking stays active)")
-  hideCDM:SetPoint("BOTTOMLEFT", INSET, 34)
+  -- Hide Blizzard's own Cooldown Manager (drives viewer alpha only, not Hide(), so our
+  -- state mirror keeps working). A checkbox, bottom-left.
+  local hideCDM = flatCheck(p, "Hide Blizzard's Cooldown Manager")
+  hideCDM:SetPoint("BOTTOMLEFT", PAD_L, 30)
   hideCDM:SetScript("OnClick", function()
     local on = not hideCDM:Get()
     hideCDM:Set(on)
@@ -2888,15 +3403,16 @@ local function Build()
 
   -- Profiles: the active-profile button (bottom-right) opens the Profiles drawer
   -- (switch / new / copy / rename / delete). Label tracks the active profile.
-  local profileBtn = flatButton(p, 190, 24, COLOR.purple, "Profile: …", 12)
-  profileBtn:SetPoint("BOTTOMRIGHT", -INSET, 31)
+  local profileBtn = flatButton(p, 191, 28, COLOR.heroic, "", 11)   -- Figma: #8031ff @ 0.2
+  profileBtn:SetBase(0.2)
+  profileBtn.text:Hide()   -- replaced by a two-weight label: "Profile:" (Regular) + name (Semibold)
+  C._profileLabel = twoWeightLabel(profileBtn, 11)
+  profileBtn:SetPoint("BOTTOMRIGHT", -PAD_L, 28)
   profileBtn:SetScript("OnClick", function() C:OpenProfileManager() end)
   C._profileBtn = profileBtn
   C:UpdateProfileButton()
 
-  local hint = newText(p, FONT.body, 11, MUTE, "CENTER")
-  hint:SetPoint("BOTTOM", 0, 12)
-  hint:SetText("Drag the title bar to move · drag an aura on screen to place it · blank texture = spell icon")
+  C:BuildLanding(p)   -- the landing overlay (logo + create buttons + View All)
 
   p:SetScript("OnShow", function()
     hideCDM:Set(GA.db and GA.db.hideBlizzardCDM)
@@ -2907,7 +3423,7 @@ local function Build()
       GA.Displays.forced = true
       GA.Displays:SetInteractive(true)
     end
-    SetSelected(selectedID or DisplayList()[1])   -- preview (selected + eye-on) via RefreshForced
+    C:ShowLanding()   -- the panel opens to the landing (Default State): pick a type or View All
   end)
   p:SetScript("OnHide", function()
     CloseSubWindows()   -- close any docked drawer so it doesn't linger/reappear
