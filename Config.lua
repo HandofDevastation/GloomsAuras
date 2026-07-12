@@ -2858,20 +2858,7 @@ function C:BuildEditor(editor)
   C:AccordionAddSection("appearance", "Appearance, Position & Size", 310, function(ct) C:BuildAppearanceSection(ct) end)
   C:AccordionAddSection("text", "Text", 285, function(ct) C:BuildTextSection(ct) end)
   C:AccordionAddSection("effects", "Effects & Motion", 92, function(ct) C:BuildEffectsSection(ct) end)
-  C:AccordionAddSection("sounds", "Sounds", 40, function(ct)
-    local sb = flatButton(ct, 150, 22, COLOR.heroic, "None", 12); sb:SetBase(0.4); sb:SetPoint("TOPLEFT", 2, -6)
-    local function soundLabel() local c = Cfg(); return (c and c.sound and c.sound.name) or "None" end
-    sb:SetScript("OnClick", function()
-      local c = Cfg(); if not c then return end
-      OpenSoundPicker(function(item)
-        if item.file then c.sound = { file = item.file, name = item.name, channel = "Master" } else c.sound = nil end
-        sb:SetText(soundLabel())
-      end, c.sound and c.sound.file)
-    end)
-    local tb = flatButton(ct, 52, 22, COLOR.heroic, "Test", 12); tb:SetBase(0.4); tb:SetPoint("LEFT", sb, "RIGHT", 8, 0)
-    tb:SetScript("OnClick", function() local c = Cfg(); if c and c.sound and c.sound.file then pcall(PlaySoundFile, c.sound.file, c.sound.channel or "Master") end end)
-    rows[#rows + 1] = { refresh = function() sb:SetText(soundLabel()) end, setEnabled = function(_, on) sb:SetEnabled(on); tb:SetEnabled(on) end }
-  end)
+  C:AccordionAddSection("sounds", "Sounds", 110, function(ct) C:BuildSoundSection(ct) end)
   C:AccordionAddSection("load", "Aura Load Conditions", 40, function(ct)
     local b = flatButton(ct, 130, 24, COLOR.heroic, "Visibility…", 12); b:SetBase(0.4); b:SetPoint("TOPLEFT", 2, -6)
     b:SetScript("OnClick", function() if selectedID then OpenVisibilityEditor(selectedID) end end)
@@ -3279,6 +3266,42 @@ function C:BuildEffectsSection(ct)
     "Custom Color")
   local hint = newText(ct, FONT.body, 11, MUTE, "LEFT"); hint:SetPoint("TOPLEFT", 0, -44); hint:SetWidth(360); hint:SetJustifyH("LEFT")
   hint:SetText("Glow shows while the aura is on screen. Custom Color off = the glow's own colour.")
+end
+
+-- The Sounds section — a sound pick + Test, plus WHEN it plays: on trigger (aura
+-- applied / cooldown ready), on wear-off, or on entering the pandemic window. The
+-- timing writes cfg.sound.on; CDM fires it from the matching Blizzard alert event
+-- (auto-path displays) or the shown/hidden edge (compound-trigger / decoration).
+function C:BuildSoundSection(ct)
+  local sb = flatButton(ct, 150, 22, COLOR.heroic, "None", 12); sb:SetBase(0.4); sb:SetPoint("TOPLEFT", 2, -6)
+  local function soundLabel() local c = Cfg(); return (c and c.sound and c.sound.name) or "None" end
+
+  -- The "Play:" timing dropdown — only meaningful with a sound set, so its enabled state
+  -- follows both the selection AND whether a sound is chosen.
+  local ON = { { "trigger", "When it triggers" }, { "untrigger", "When it wears off" }, { "pandemic", "Pandemic window" } }
+  local onRow = MakeDropdown(ct, 2, -36, 220, "Play:", ON,
+    function() local c = Cfg(); return (c and c.sound and c.sound.on) or "trigger" end,
+    function(v) local c = Cfg(); if c and c.sound then c.sound.on = v end end)
+  local function refreshOnEnabled() local c = Cfg(); onRow:setEnabled((c and c.sound) and true or false) end
+
+  sb:SetScript("OnClick", function()
+    local c = Cfg(); if not c then return end
+    OpenSoundPicker(function(item)
+      if item.file then c.sound = c.sound or {}; c.sound.file = item.file; c.sound.name = item.name; c.sound.channel = "Master"
+      else c.sound = nil end
+      sb:SetText(soundLabel()); onRow:refresh(); refreshOnEnabled()
+    end, c.sound and c.sound.file)
+  end)
+  local tb = flatButton(ct, 52, 22, COLOR.heroic, "Test", 12); tb:SetBase(0.4); tb:SetPoint("LEFT", sb, "RIGHT", 8, 0)
+  tb:SetScript("OnClick", function() local c = Cfg(); if c and c.sound and c.sound.file then pcall(PlaySoundFile, c.sound.file, c.sound.channel or "Master") end end)
+
+  local hint = newText(ct, FONT.body, 11, MUTE, "LEFT"); hint:SetPoint("TOPLEFT", 2, -72); hint:SetWidth(356); hint:SetJustifyH("LEFT")
+  hint:SetText("Triggers = when the aura is applied (no re-fire on target swap). Pandemic works for DoT/debuff auras.")
+
+  rows[#rows + 1] = {
+    refresh = function() sb:SetText(soundLabel()); onRow:refresh(); refreshOnEnabled() end,
+    setEnabled = function(_, on) sb:SetEnabled(on); tb:SetEnabled(on); if on then refreshOnEnabled() else onRow:setEnabled(false) end end,
+  }
 end
 
 local function Build()

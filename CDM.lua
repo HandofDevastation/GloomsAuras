@@ -141,6 +141,38 @@ function CDM:PlaySound(spellID, cfg)
   end
 end
 
+-- When a display's sound plays: "trigger" (default) | "untrigger" | "pandemic".
+-- Stored on cfg.sound.on; nil = legacy = "trigger".
+local function soundOn(cfg)
+  return (cfg and cfg.sound and cfg.sound.on) or "trigger"
+end
+
+-- The spellID whose CDM ALERT events (TriggerAlertEvent: apply/remove/pandemic/ready/
+-- on-cd) drive this display's sound — or nil to fall back to the shown/hidden EDGE.
+--   * AUTO-path (a tracked spell, no trigger): the display's own spell.
+--   * A trigger that is a SINGLE "this debuff is active on the target" leaf: that debuff.
+--     It reduces to auto-tracking one target aura, so its sound should fire on the aura's
+--     real apply/remove — which (unlike the show edge) does NOT re-fire on a target swap.
+-- Everything else (multi-condition triggers, self-buff leaves, decorations) has no single
+-- clean per-spell alert, so it rides the edge. Self-buff leaves deliberately stay on the
+-- edge: they're always on you, so they never suffer the target-swap re-fire anyway.
+local function soundAuraSpell(cfg)
+  if not cfg then return nil end
+  local t = cfg.trigger
+  if t and t.conditions then
+    if #t.conditions == 1 then
+      local c = t.conditions[1]
+      if c and not c.conditions and c.state == "buff_active" and c.spellID
+         and (c.k == "debuff" or (CDM.auraUnit and CDM.auraUnit[c.spellID] == "target")) then
+        return c.spellID
+      end
+    end
+    return nil
+  end
+  return cfg.spellID
+end
+local function soundUsesAlert(cfg) return soundAuraSpell(cfg) ~= nil end
+
 -- ---------------------------------------------------------------------------
 -- Trigger evaluation. State per watched spell: buffActive[] (mirrored from
 -- item:IsActive) and available[] (mirrored from Blizzard's cooldown transitions).
@@ -288,30 +320,43 @@ end
 -- event — SPELL_UPDATE_COOLDOWN fires on cd START, not always END — so the poll
 -- re-reads the cd shadow's IsShown() ~5×/s; works whether or not the spell is placed).
 function CDM:UpdateVisibilityPoll()
-  local uses = false
+  local usesVis = false
   local db = GA.db and GA.db.displays
   local groups = GA.db and GA.db.groups
   if db then
     for _, cfg in pairs(db) do
       if cfg.enabled ~= false then
-        if HasVisibilityConstraints(cfg.visibility) then uses = true; break end
-        if cfg.kind == "bar" and cfg.bar and cfg.bar.mode == "cd_dur" then uses = true; break end
+        if HasVisibilityConstraints(cfg.visibility) then usesVis = true; break end
+        if cfg.kind == "bar" and cfg.bar and cfg.bar.mode == "cd_dur" then usesVis = true; break end
         -- A group load rule (spec/combat/target/…) also needs the live poll.
         local g = cfg.group and groups and groups[cfg.group]
-        if g and HasVisibilityConstraints(g.visibility) then uses = true; break end
+        if g and HasVisibilityConstraints(g.visibility) then usesVis = true; break end
       end
     end
   end
+  -- Also poll while any BUFF frame is bound: buff_active state for target debuffs isn't driven
+  -- by a reliable event, so re-derive it from the aura's live presence ~5×/s. It's cheap (a few
+  -- C_UnitAuras lookups) and only re-renders on a real change — the safety net that catches a
+  -- first application the event-driven re-poll can race past.
+  local usesBuff = false
+  for frame in pairs(self.frameToSpell) do
+    if self.frameKind[frame] == "buff" then usesBuff = true; break end
+  end
+  self._pollVis, self._pollBuff = usesVis, usesBuff
   if not self._visFrame then
     local fr = CreateFrame("Frame"); fr._acc = 0
     fr:SetScript("OnUpdate", function(self2, dt)
       self2._acc = self2._acc + dt
-      if self2._acc >= 0.2 then self2._acc = 0; CDM:RefreshDisplays() end
+      if self2._acc >= 0.2 then
+        self2._acc = 0
+        if CDM._pollBuff then CDM:RepollBuffPresence() end  -- refreshes only on a real change
+        if CDM._pollVis then CDM:RefreshDisplays() end
+      end
     end)
     fr:Hide()
     self._visFrame = fr
   end
-  if uses then self._visFrame:Show() else self._visFrame:Hide() end
+  if usesVis or usesBuff then self._visFrame:Show() else self._visFrame:Hide() end
 end
 
 function CDM:EvalDisplay(id, cfg)
@@ -445,8 +490,10 @@ function CDM:RefeedBars()
   end
 end
 
--- Register UNIT_AURA + PLAYER_TARGET_CHANGED only while at least one bar exists (they fire
--- a lot; no reason to pay for them otherwise). Mirrors the UpdateVisibilityPoll gating idea.
+-- Register UNIT_AURA + PLAYER_TARGET_CHANGED while at least one bar exists OR any buff frame
+-- is bound (they fire a lot; no reason to pay for them otherwise). These events drive both
+-- RefeedBars (bar duration/stacks) and RepollBuffPresence (buff_active trigger state for
+-- target debuffs, which OnActiveStateChanged doesn't re-check). Gated like UpdateVisibilityPoll.
 function CDM:UpdateBarEvents()
   if not self._events then return end
   local any = false
@@ -454,6 +501,11 @@ function CDM:UpdateBarEvents()
   if db then
     for _, cfg in pairs(db) do
       if cfg.kind == "bar" and cfg.enabled ~= false then any = true; break end
+    end
+  end
+  if not any then
+    for frame in pairs(self.frameToSpell) do
+      if self.frameKind[frame] == "buff" then any = true; break end
     end
   end
   if any and not self._barEvents then
@@ -465,6 +517,53 @@ function CDM:UpdateBarEvents()
     self._events:UnregisterEvent("UNIT_AURA")
     self._events:UnregisterEvent("PLAYER_TARGET_CHANGED")
   end
+end
+
+-- Re-derive buffActive[] for every bound BUFF frame from the aura's live PRESENCE (its native
+-- auraInstanceID + C_UnitAuras on the resolved unit — the §9 signal the bars use, secret-safe:
+-- we test existence, never a value). This is the re-check that OnActiveStateChanged does NOT do
+-- for a debuff on your target (it only fires a one-time active flip that's unreliable for target
+-- auras in Tracked Buffs), so buffActive would otherwise go stale after a cast / target swap.
+-- SAFETY: presence only ever sets ACTIVE=true; when the aura isn't found we fall back to the
+-- frame's own IsActive() (the previously-working signal) so a buff whose item doesn't expose an
+-- instance id can't regress. Runs coalesced on UNIT_AURA / PLAYER_TARGET_CHANGED.
+local EMPTY_CFG = {}
+function CDM:RepollBuffPresence(silent)
+  if not (C_UnitAuras and C_UnitAuras.GetAuraDataByAuraInstanceID) then return end
+  local changed = false
+  for frame, sid in pairs(self.frameToSpell) do
+    if self.frameKind[frame] == "buff" then
+      local present = false
+      local aiid = frame.auraInstanceID
+      if isPresent(aiid) then
+        local unit = self:ResolveAuraUnit(EMPTY_CFG, sid, aiid)
+        if unit and UnitExists(unit) then
+          local ok, data = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, unit, aiid)
+          present = (ok and data ~= nil) and true or false
+        end
+      end
+      local val
+      if present then
+        val = true
+      else
+        local ok, act = pcall(frame.IsActive, frame)   -- fall back to the old signal
+        if ok and not issecret(act) then val = act and true or false else val = self.buffActive[sid] end
+      end
+      if self.buffActive[sid] ~= val then self.buffActive[sid] = val; changed = true end
+    end
+  end
+  if changed then self:RefreshDisplays(silent) end
+end
+
+-- Coalesce a burst of UNIT_AURA into one next-frame re-poll — and next-frame so the CDM has
+-- already updated its item frames' auraInstanceID for the new aura/target before we read them.
+function CDM:ScheduleBuffRepoll()
+  if self._buffRepollQueued then return end
+  self._buffRepollQueued = true
+  C_Timer.After(0, function()
+    CDM._buffRepollQueued = false
+    CDM:RepollBuffPresence()
+  end)
 end
 
 -- --------------------------------------------------------------------------
@@ -645,8 +744,14 @@ function CDM:RefreshDisplays(silent)
     if cfg.enabled ~= false then
       local show = self:EvalDisplay(sid, cfg)
       if show == true then
-        if not self.lastShown[sid] and not silent then self:PlaySound(sid, cfg) end
+        local wasShown = self.lastShown[sid]
         self.lastShown[sid] = true
+        -- Auto-path displays fire "trigger" from the CDM alert (OnAuraApplied/Available),
+        -- which — unlike this shown edge — does NOT re-fire on a target swap. Only
+        -- compound-trigger / decoration displays play "trigger" on the edge here.
+        if not wasShown and not silent and not soundUsesAlert(cfg) and soundOn(cfg) == "trigger" then
+          self:PlaySound(sid, cfg)
+        end
         GA.Displays:Show(sid)
         if cfg.kind == "bar" and GA.Displays.UpdateBar then
           GA.Displays:UpdateBar(sid)   -- feed the source aura's duration object → the bar drains
@@ -655,7 +760,11 @@ function CDM:RefreshDisplays(silent)
           GA.Displays:RefreshCountText(sid)   -- live charge-count update (Pass 2)
         end
       elseif show == false then
+        local wasShown = self.lastShown[sid]
         self.lastShown[sid] = false
+        if wasShown and not silent and not soundUsesAlert(cfg) and soundOn(cfg) == "untrigger" then
+          self:PlaySound(sid, cfg)
+        end
         GA.Displays:Hide(sid)
       end
       -- nil = unknown (secret): leave the display as-is
@@ -729,6 +838,40 @@ local function OnItemActiveChanged(itemFrame)
   CDM:RefreshDisplays()
 end
 
+-- Blizzard's CDM fires CooldownViewerItemMixin:TriggerAlertEvent(event) at each
+-- life-cycle moment of a tracked spell (aura applied/removed, entered pandemic, cooldown
+-- ready/started). We hooksecurefunc it and read `event` — a plain enum, computed in
+-- Blizzard's secure context — so this is secret-safe (we never touch a secret value).
+-- It drives per-timing SOUNDS for AUTO-path displays; the key win is that OnAuraApplied
+-- fires only on a genuine (re)application, NOT on a target swap, killing the DoT re-fire.
+local ALERT_ENUM   -- Enum.CooldownViewerAlertEventType, resolved lazily (nil pre-login)
+local function OnItemAlertEvent(itemFrame, event)
+  local spellID = CDM.frameToSpell[itemFrame]
+  if not spellID then return end
+  -- A spell in two viewers has two hooked frames; only its PRIMARY frame (the one whose
+  -- role matches CDM.kind — aura wins) may drive sound, so a cooldown frame's "ready"
+  -- can't double-fire an aura-driven display's "trigger".
+  if CDM.frameKind[itemFrame] ~= CDM.kind[spellID] then return end
+  ALERT_ENUM = ALERT_ENUM or (Enum and Enum.CooldownViewerAlertEventType)
+  if not ALERT_ENUM then return end
+  local bucket
+  if     event == ALERT_ENUM.OnAuraApplied then bucket = "trigger"
+  elseif event == ALERT_ENUM.OnAuraRemoved then bucket = "untrigger"
+  elseif event == ALERT_ENUM.PandemicTime  then bucket = "pandemic"
+  elseif event == ALERT_ENUM.Available     then bucket = "trigger"
+  elseif event == ALERT_ENUM.OnCooldown    then bucket = "untrigger"
+  else return end
+  if EditModeActive() or CDM._emSettling then return end
+  local db = GA.db and GA.db.displays
+  if not db then return end
+  for id, cfg in pairs(db) do
+    if cfg.enabled ~= false and cfg.sound and soundOn(cfg) == bucket
+       and soundAuraSpell(cfg) == spellID then
+      CDM:PlaySound(id, cfg)
+    end
+  end
+end
+
 -- (Re)bind every configured display to its CDM item frame + hook + initial sync.
 function CDM:Discover()
   wipe(self.frameToSpell)
@@ -767,6 +910,13 @@ function CDM:Discover()
         if not frame.__gaHooked and type(frame.OnActiveStateChanged) == "function" then
           frame.__gaHooked = true
           hooksecurefunc(frame, "OnActiveStateChanged", OnItemActiveChanged)
+        end
+
+        -- Hook the CDM's alert events (apply/remove/pandemic/ready/on-cd) for per-timing
+        -- sounds. Secret-safe: `event` is a plain enum read after Blizzard's secure code.
+        if not frame.__gaAlertHooked and type(frame.TriggerAlertEvent) == "function" then
+          frame.__gaAlertHooked = true
+          hooksecurefunc(frame, "TriggerAlertEvent", OnItemAlertEvent)
         end
 
         if kind == "cooldown" then
@@ -864,8 +1014,9 @@ function CDM:Discover()
     end
   end
 
-  self:UpdateVisibilityPoll()  -- enable the visibility poll if any display uses it
+  self:UpdateVisibilityPoll()  -- enable the poll if any display uses visibility OR a buff is bound
   self:UpdateBarEvents()       -- (un)register UNIT_AURA/target events for bar duration feeds
+  self:RepollBuffPresence(true) -- seed buff_active from live presence for freshly-bound frames (silent)
   self:RefreshDisplays(true)   -- silent initial sync (no sound on reload)
   self:ApplyBlizzardHide()     -- re-assert the CDM-hide toggle after any re-pool
   if GA.Displays and GA.Displays.forced and GA.Displays.RefreshForced then
@@ -956,11 +1107,14 @@ function CDM:Init()
       CDM:FeedAllChargeShadows()
       CDM:RefreshDisplays()
     elseif event == "UNIT_AURA" then
-      -- Registered only while bars exist (UpdateBarEvents). A DoT refresh/extension fires this
-      -- without an active-state transition, so re-feed shown bars to reflect the new duration.
-      if arg1 == "target" or arg1 == "player" then CDM:RefeedBars() end
+      -- Registered while a bar exists OR a buff is bound (UpdateBarEvents). A DoT refresh/
+      -- extension or a debuff landing fires this without an active-state transition, so re-feed
+      -- shown bars AND re-poll buff_active presence to catch target debuffs OnActiveStateChanged
+      -- misses.
+      if arg1 == "target" or arg1 == "player" then CDM:RefeedBars(); CDM:ScheduleBuffRepoll() end
     elseif event == "PLAYER_TARGET_CHANGED" then
       CDM:RefeedBars()             -- new target ⇒ a target-debuff bar points at a new instance
+      CDM:ScheduleBuffRepoll()     -- …and its buff_active trigger must re-evaluate on the new target
     else
       CDM:HookViewers()
       CDM:Discover()
@@ -1095,33 +1249,75 @@ end
 function CDM:Trace()
   GA.msg("=== trigger trace (run while reproducing the problem) ===")
   local db = (GA.db and GA.db.displays) or {}
+
+  local function nameOf(sid)
+    if not sid or issecret(sid) then return "?" end
+    local ok, nm = pcall(C_Spell.GetSpellName, sid)
+    return (ok and nm) or "?"
+  end
+  local function frameFor(sid)
+    for f, fs in pairs(self.frameToSpell) do if fs == sid then return f end end
+    return nil
+  end
+  local function isBound(sid) return frameFor(sid) ~= nil end
+
+  -- Which ALERT signals Blizzard's CDM offers for this spell (C_CooldownViewer.GetValidAlertTypes
+  -- on the item's cooldownID). This is what decides whether we can EVER get a "pandemic" sound —
+  -- if PANDEMIC isn't listed here, the CDM will never fire it and there's nothing to hook.
+  local A = Enum and Enum.CooldownViewerAlertEventType
+  local function alertsFor(sid)
+    local frame = frameFor(sid)
+    if not (frame and A and C_CooldownViewer and C_CooldownViewer.GetValidAlertTypes and frame.GetCooldownID) then return "" end
+    local ok0, cdid = pcall(frame.GetCooldownID, frame)
+    if not ok0 or not cdid then return "" end
+    local ok, types = pcall(C_CooldownViewer.GetValidAlertTypes, cdid)
+    if not ok or type(types) ~= "table" then return "  alerts=?" end
+    local set = {}; for _, t in ipairs(types) do set[t] = true end
+    local parts = {}
+    if set[A.OnAuraApplied] then parts[#parts + 1] = "apply" end
+    if set[A.OnAuraRemoved] then parts[#parts + 1] = "remove" end
+    if set[A.Available]     then parts[#parts + 1] = "ready" end
+    if set[A.OnCooldown]    then parts[#parts + 1] = "oncd" end
+    local pan = set[A.PandemicTime] and "|cff55ff55PANDEMIC|r" or "|cffff5555noPANDEMIC|r"
+    return ("  alerts=[%s %s]"):format(table.concat(parts, ","), pan)
+  end
+
+  -- A trigger node is a LEAF ({spellID, state}) or a nested GROUP ({logic, conditions}).
+  -- Recurse so nested groups don't crash (the old code called GetSpellName on a group's
+  -- nil spellID) and so every leaf shows its live mirror + eval + which alerts it can fire.
+  local function renderNode(node, indent)
+    if node.conditions then
+      print(("%s[group %s]:"):format(indent, node.logic or "AND"))
+      for _, c in ipairs(node.conditions) do renderNode(c, indent .. "   ") end
+    else
+      local sid = node.spellID
+      local line = ("%s[%s] %s (%s) mirror(buff=%s avail=%s) => %s%s"):format(
+        indent, tostring(node.state), nameOf(sid), tostring(sid),
+        fmtBool(self.buffActive[sid]), fmtBool(self.available[sid]),
+        tostring(self:EvalCondition(node)), isBound(sid) and "" or " |cffff5555<not bound>|r")
+      print(line .. alertsFor(sid))
+    end
+  end
+
   for id, cfg in pairs(db) do
     if cfg.enabled ~= false then
-      local sid = cfg.spellID              -- tracked spell (state lookups); id = display key (frame)
-      local frame
-      for f, fs in pairs(self.frameToSpell) do if fs == sid then frame = f; break end end
+      local sid = cfg.spellID
       local dispFrame = GA.Displays and GA.Displays.frames and GA.Displays.frames[id]
       local shown = dispFrame and dispFrame:IsShown() and true or false
-      print(("|cff936bff%s|r (%s) [%s]  shown=%s%s"):format(
-        cfg.label or "?", tostring(sid), self.kind[sid] or "?", tostring(shown),
-        frame and "" or "  |cffff5555<item NOT found>|r"))
-      print(("   mirror: buffActive=%s  available=%s  charge=%s"):format(
-        fmtBool(self.buffActive[sid]), fmtBool(self.available[sid]), tostring(self.isCharge[sid])))
-      if frame and self.kind[sid] == "cooldown" then
-        print(("   item: isOnActualCooldown=%s cooldownIsActive=%s isOnGCD=%s start=%s"):format(
-          fmtBool(frame.isOnActualCooldown), fmtBool(frame.cooldownIsActive),
-          fmtBool(frame.isOnGCD), fmtBool(frame.cooldownStartTime)))
-      end
+      print(("|cff936bff%s|r (id=%s spell=%s) shown=%s"):format(
+        cfg.label or "?", tostring(id), tostring(sid), tostring(shown)))
       local t = cfg.trigger
       if t and t.conditions and #t.conditions > 0 then
         print(("   trigger %s:"):format(t.logic or "AND"))
-        for _, c in ipairs(t.conditions) do
-          local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(c.spellID)) or "?"
-          print(("      [%s] %s (%s) => %s"):format(c.state, nm, tostring(c.spellID), tostring(self:EvalCondition(c))))
-        end
+        for _, c in ipairs(t.conditions) do renderNode(c, "      ") end
         print(("   => EvalDisplay=%s"):format(tostring(self:EvalDisplay(id, cfg))))
+      elseif sid then
+        print(("   auto [%s]: buffActive=%s available=%s charge=%s%s => EvalDisplay=%s"):format(
+          self.kind[sid] or "?", fmtBool(self.buffActive[sid]), fmtBool(self.available[sid]),
+          tostring(self.isCharge[sid]), isBound(sid) and "" or "  |cffff5555<item NOT found>|r",
+          tostring(self:EvalDisplay(id, cfg))))
       else
-        print("   (no trigger — auto behavior)")
+        print("   (decoration — always shown)")
       end
     end
   end
