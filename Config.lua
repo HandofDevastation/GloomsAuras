@@ -2596,6 +2596,7 @@ function C:ShowLanding()
   C.mode = "landing"
   if listFrame then listFrame:Hide() end
   if C._editor then C._editor:Hide() end
+  if C._editorTrack then C._editorTrack:Hide(); C._editorThumb:Hide() end
   if C._landing then C._landing:Show() end
   selectedID = nil
   if GA.Displays then
@@ -2609,6 +2610,8 @@ function C:ShowEditor()
   if C._landing then C._landing:Hide() end
   if listFrame then listFrame:Show() end
   if C._editor then C._editor:Show() end
+  RefreshList()          -- populate the left list (was blank until the first wheel scroll)
+  C:AccordionLayout()    -- recompute the scroll extent + show the scrollbar if it overflows
 end
 
 -- Create a blank aura of the chosen type and open it in the editor. Icon + Texture are
@@ -2721,6 +2724,7 @@ function C:AccordionLayout()
     end
     y = y - ACC_GAP
   end
+  C:LayoutEditorScroll(-y + 12)   -- size the scroll child to the content + update the scrollbar
 end
 
 -- Update a section's content height (used by the Trigger section, which grows/shrinks
@@ -2730,6 +2734,34 @@ function C:AccordionSetHeight(key, h)
     if s.key == key then s.height = h; s.content:SetHeight(h); break end
   end
   C:AccordionLayout()
+end
+
+-- Editor scroll. The accordion can exceed the pane height when a tall section (e.g. Aura
+-- Load Conditions) is open, so the editor is a ScrollFrame; the scrollbar shows only on
+-- overflow and lives in the right margin so it never covers content.
+function C:SetEditorScroll(v)
+  local maxS = C._editorMaxScroll or 0
+  v = math.max(0, math.min(maxS, v or 0)); C._editorScroll = v
+  if C._editor then C._editor:SetVerticalScroll(v) end
+  local track, thumb = C._editorTrack, C._editorThumb
+  if track and thumb and thumb:IsShown() then
+    local range = PANE_H - thumb:GetHeight()
+    local frac = (maxS > 0) and (v / maxS) or 0
+    thumb:ClearAllPoints(); thumb:SetPoint("TOPRIGHT", track, "TOPRIGHT", 0, -range * frac)
+  end
+end
+
+-- Size the scroll child to the laid-out content + (un)show the scrollbar. `total` = content height.
+function C:LayoutEditorScroll(total)
+  local child = C._editorChild; if not child then return end
+  child:SetHeight(math.max(PANE_H, total))
+  C._editorMaxScroll = math.max(0, total - PANE_H)
+  local track, thumb = C._editorTrack, C._editorThumb
+  if track and thumb then
+    if C._editorMaxScroll <= 0 then track:Hide(); thumb:Hide()
+    else track:Show(); thumb:Show(); thumb:SetHeight(math.max(24, PANE_H * PANE_H / total)) end
+  end
+  C:SetEditorScroll(C._editorScroll or 0)
 end
 
 -- The Appearance, Position & Size section — texture + recolor/desaturate + blend/strata
@@ -2857,14 +2889,9 @@ function C:BuildEditor(editor)
   C:AccordionAddSection("trigger", "Aura Trigger(s)", 120, function(ct) C:BuildTriggerSection(ct) end)
   C:AccordionAddSection("appearance", "Appearance, Position & Size", 310, function(ct) C:BuildAppearanceSection(ct) end)
   C:AccordionAddSection("text", "Text", 285, function(ct) C:BuildTextSection(ct) end)
-  C:AccordionAddSection("effects", "Effects & Motion", 92, function(ct) C:BuildEffectsSection(ct) end)
+  C:AccordionAddSection("effects", "Effects & Motion", 112, function(ct) C:BuildEffectsSection(ct) end)
   C:AccordionAddSection("sounds", "Sounds", 110, function(ct) C:BuildSoundSection(ct) end)
-  C:AccordionAddSection("load", "Aura Load Conditions", 40, function(ct)
-    local b = flatButton(ct, 130, 24, COLOR.heroic, "Visibility…", 12); b:SetBase(0.4); b:SetPoint("TOPLEFT", 2, -6)
-    b:SetScript("OnClick", function() if selectedID then OpenVisibilityEditor(selectedID) end end)
-    visibilitySummary = newText(ct, FONT.body, 12, TEXT, "LEFT")
-    visibilitySummary:SetPoint("LEFT", b, "RIGHT", 10, 0); visibilitySummary:SetWidth(210); visibilitySummary:SetJustifyH("LEFT")
-  end)
+  C:AccordionAddSection("load", "Aura Load Conditions", 420, function(ct) C:BuildLoadConditionsSection(ct) end)
 
   C:AccordionOpen("trigger")   -- icon aura default-opens its Trigger section (matches the mock)
 end
@@ -3260,11 +3287,14 @@ function C:BuildEffectsSection(ct)
   rows[#rows + 1] = MakeDropdown(ct, 0, 0, 220, "Glow:", GLOW,
     function() local c = Cfg(); return (c and c.glow and c.glow.type) or "none" end,
     function(v) local c = Cfg(); if not c then return end; c.glow = c.glow or {}; c.glow.type = (v ~= "none") and v or nil end)
-  rows[#rows + 1] = MakeColor(ct, 239, -4,
+  -- Custom Color sits on its OWN row under the dropdown: the checkbox + "Custom Color"
+  -- label + swatch is ~157px wide, which overruns the 360px editor if placed beside the
+  -- 220px Glow dropdown (the swatch fell off the panel's right edge).
+  rows[#rows + 1] = MakeColor(ct, 0, -38,
     function() local c = Cfg(); return c and c.glow and c.glow.customColor and c.glow.color end,
     function(v) local c = Cfg(); if not c then return end; c.glow = c.glow or {}; c.glow.color = v; c.glow.customColor = (v ~= nil) or nil end,
     "Custom Color")
-  local hint = newText(ct, FONT.body, 11, MUTE, "LEFT"); hint:SetPoint("TOPLEFT", 0, -44); hint:SetWidth(360); hint:SetJustifyH("LEFT")
+  local hint = newText(ct, FONT.body, 11, MUTE, "LEFT"); hint:SetPoint("TOPLEFT", 0, -70); hint:SetWidth(360); hint:SetJustifyH("LEFT")
   hint:SetText("Glow shows while the aura is on screen. Custom Color off = the glow's own colour.")
 end
 
@@ -3301,6 +3331,109 @@ function C:BuildSoundSection(ct)
   rows[#rows + 1] = {
     refresh = function() sb:SetText(soundLabel()); onRow:refresh(); refreshOnEnabled() end,
     setEnabled = function(_, on) sb:SetEnabled(on); tb:SetEnabled(on); if on then refreshOnEnabled() else onRow:setEnabled(false) end end,
+  }
+end
+
+-- The Aura Load Conditions section — the per-aura visibility gate (Combat/Target state,
+-- context toggles, spec multi-select, known-spell) + the master Disabled/Enabled switch.
+-- Inline replacement for the old docked Visibility drawer (which still backs group load
+-- rules). Reuses the existing cfg.visibility model + CDM:VisibilityGate — no new engine.
+-- No open-state Figma mock (411:164 is only the header), so laid out to the redesign language.
+-- Reads are NON-SEEDING: viewing must not create cfg.visibility on a bare/decoration aura.
+function C:BuildLoadConditionsSection(ct)
+  local function vis() local c = Cfg(); return c and c.visibility end                 -- read (no seed)
+  local function visW() local c = Cfg(); if not c then return nil end; c.visibility = c.visibility or {}; return c.visibility end
+  local function poke() if GA.CDM then GA.CDM:UpdateVisibilityPoll(); GA.CDM:RefreshDisplays() end end
+
+  local COMBAT = { { "any", "Any" }, { "in", "In Combat" }, { "out", "Out of Combat" } }
+  local TARGET = { { "any", "Any" }, { "has", "Has Target" }, { "none", "No Target" } }
+  rows[#rows + 1] = MakeDropdown(ct, 0, -6, 172, "Combat:", COMBAT,
+    function() local v = vis(); return (v and v.combat) or "any" end,
+    function(x) local v = visW(); if v then v.combat = (x ~= "any") and x or nil; poke() end end)
+  rows[#rows + 1] = MakeDropdown(ct, 184, -6, 172, "Target:", TARGET,
+    function() local v = vis(); return (v and v.target) or "any" end,
+    function(x) local v = visW(); if v then v.target = (x ~= "any") and x or nil; poke() end end)
+
+  -- Context toggles (each ANDs in — require it true). Two columns.
+  local function toggle(key, label, x, y)
+    local c = flatCheck(ct, label); c:SetPoint("TOPLEFT", x, y)
+    c:SetScript("OnClick", function()
+      local v = visW(); if not v then return end
+      c:Set(not c:Get()); v[key] = c:Get() or nil; poke()
+    end)
+    rows[#rows + 1] = { refresh = function() local v = vis(); c:Set(v and v[key]) end,
+                        setEnabled = function(_, on) c:SetEnabled(on) end }
+  end
+  local L, R, ty, dy = 0, 186, -44, 25
+  toggle("casting",   "While casting",     L, ty)
+  toggle("mounted",   "Mounted",           L, ty - dy)
+  toggle("vehicle",   "In vehicle",        L, ty - dy * 2)
+  toggle("instance",  "In instance",       L, ty - dy * 3)
+  toggle("encounter", "In boss encounter", L, ty - dy * 4)
+  toggle("resting",   "Resting",           L, ty - dy * 5)
+  toggle("stealthed", "Stealthed",         R, ty)
+  toggle("group",     "In a group",        R, ty - dy)
+  toggle("raid",      "In a raid",         R, ty - dy * 2)
+  toggle("warmode",   "War Mode",          R, ty - dy * 3)
+  toggle("alive",     "Alive (not dead)",  R, ty - dy * 4)
+
+  -- Specialization (multi-select; none = all specs). 2-column grid.
+  local specHdr = newText(ct, FONT.head, 13, COLOR.purple, "LEFT"); specHdr:SetPoint("TOPLEFT", 0, -200); specHdr:SetText("SPECIALIZATION")
+  local specHint = newText(ct, FONT.body, 11, MUTE, "LEFT"); specHint:SetPoint("LEFT", specHdr, "RIGHT", 8, 0); specHint:SetText("(none = all specs)")
+  local specs = PlayerSpecs()
+  for i, sp in ipairs(specs) do
+    local col, r = (i - 1) % 2, math.floor((i - 1) / 2)
+    local c = flatCheck(ct, sp.name); c:SetPoint("TOPLEFT", col * 186, -224 - r * 25)
+    c:SetScript("OnClick", function()
+      local v = visW(); if not v then return end
+      v.specs = v.specs or {}; c:Set(not c:Get()); v.specs[sp.id] = c:Get() or nil
+      if not next(v.specs) then v.specs = nil end
+      poke()
+    end)
+    rows[#rows + 1] = { refresh = function() local v = vis(); c:Set(v and v.specs and v.specs[sp.id]) end,
+                        setEnabled = function(_, on) c:SetEnabled(on) end }
+  end
+  local skTop = -224 - math.max(1, math.ceil(#specs / 2)) * 25 - 14
+
+  -- Spell / talent known.
+  local skHdr = newText(ct, FONT.head, 13, COLOR.purple, "LEFT"); skHdr:SetPoint("TOPLEFT", 0, skTop); skHdr:SetText("SPELL / TALENT KNOWN")
+  local skBox = flatEditBox(ct, 80, 22); skBox:SetPoint("TOPLEFT", 0, skTop - 22); skBox:SetNumeric(true)
+  local skName = newText(ct, FONT.body, 12, TEXT, "LEFT"); skName:SetPoint("LEFT", skBox, "RIGHT", 8, 0); skName:SetWidth(268); skName:SetJustifyH("LEFT")
+  local function skRefreshName()
+    local v = vis(); local id = v and v.spellKnown
+    if id then
+      local nm = C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(id)
+      skName:SetText(nm and ("|cffffffff" .. nm .. "|r — shows only if known") or ("spell " .. id))
+    else
+      skName:SetText("|cff888888enter a spell ID (talents count)|r")
+    end
+  end
+  skBox:SetScript("OnEnterPressed", function(self)
+    local v = visW(); if not v then return end
+    v.spellKnown = tonumber(self:GetText()); skRefreshName(); self:ClearFocus(); poke()
+  end)
+  skBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  rows[#rows + 1] = { refresh = function() local v = vis(); skBox:SetText(v and v.spellKnown and tostring(v.spellKnown) or ""); skRefreshName() end,
+                      setEnabled = function(_, on) skBox:SetEnabled(on) end }
+
+  -- Master off-switch (NOT a "show when" condition — sits apart under a divider). ON =
+  -- Enabled; OFF = Disabled (cfg.enabled=false → dropped from tracking + greyed in the list).
+  local div = ct:CreateTexture(nil, "ARTWORK"); div:SetColorTexture(COLOR.rim.r, COLOR.rim.g, COLOR.rim.b, COLOR.rim.a)
+  div:SetPoint("TOPLEFT", 0, skTop - 56); div:SetPoint("TOPRIGHT", 0, skTop - 56); div:SetHeight(1)
+  local disLbl = newText(ct, FONT.bodyM, 13, TEXT, "LEFT"); disLbl:SetPoint("TOPLEFT", 0, skTop - 72); disLbl:SetText("This aura in the game:")
+  local disSwitch = makeSwitch(ct, "Disabled", "Enabled", function(v)
+    local c = Cfg(); if not c then return end
+    if v then c.enabled = nil else c.enabled = false end
+    if GA.CDM then GA.CDM:Discover() end
+    RefreshList()
+  end)
+  -- Own row (the switch's labels extend ~166px, past the 360 editor if placed beside the label).
+  disSwitch:SetPoint("TOPLEFT", 0, skTop - 98)
+  -- MUST provide setEnabled too — SetSelected calls r:refresh() AND r:setEnabled() on every
+  -- row; a row missing either throws and aborts the rest of SetSelected (trigger + group UI).
+  rows[#rows + 1] = {
+    refresh = function() local c = Cfg(); disSwitch:Set(not (c and c.enabled == false)) end,
+    setEnabled = function(_, on) disSwitch:SetEnabled(on) end,
   }
 end
 
@@ -3402,10 +3535,34 @@ local function Build()
   C:BuildLeftButtons(listFrame)
 
   -- ---- RIGHT PANE: the settings editor (redesign accordion — see C:BuildEditor) ----
-  local editor = CreateFrame("Frame", nil, p)
+  -- A ScrollFrame so a tall open section (Aura Load Conditions) scrolls inside the pane
+  -- instead of spilling into the footer. The scrollbar sits in the 20px margin between the
+  -- editor's right edge (EDITOR_X+EDITOR_W=600) and the panel edge (620) — never over content.
+  local editor = CreateFrame("ScrollFrame", nil, p)
   editor:SetPoint("TOPLEFT", EDITOR_X, CONTENT_TOP); editor:SetSize(EDITOR_W, PANE_H)
-  C._editor = editor   -- so the landing/editor mode switch can toggle it
-  C:BuildEditor(editor)
+  editor:EnableMouseWheel(true)
+  local scrollChild = CreateFrame("Frame", nil, editor)
+  scrollChild:SetSize(EDITOR_W, PANE_H)
+  editor:SetScrollChild(scrollChild)
+  C._editor = editor; C._editorChild = scrollChild   -- landing/editor switch toggles _editor
+  local sbTrack = p:CreateTexture(nil, "ARTWORK"); sbTrack:SetColorTexture(1, 1, 1, 0.06); sbTrack:SetWidth(6)
+  sbTrack:SetPoint("TOPLEFT", editor, "TOPRIGHT", 8, 0); sbTrack:SetPoint("BOTTOMLEFT", editor, "BOTTOMRIGHT", 8, 0)
+  local sbThumb = CreateFrame("Button", nil, p); sbThumb:SetWidth(6); sbThumb:EnableMouse(true)
+  local stt = sbThumb:CreateTexture(nil, "OVERLAY"); stt:SetAllPoints(); stt:SetColorTexture(COLOR.purple.r, COLOR.purple.g, COLOR.purple.b, 1)
+  sbThumb:SetPoint("TOPRIGHT", sbTrack, "TOPRIGHT", 0, 0)
+  C._editorTrack = sbTrack; C._editorThumb = sbThumb
+  editor:SetScript("OnMouseWheel", function(_, d) C:SetEditorScroll((C._editorScroll or 0) - d * 40) end)
+  local dragging, startCY, startScroll = false, 0, 0
+  sbThumb:SetScript("OnMouseDown", function() dragging = true; startScroll = C._editorScroll or 0; local _, cy = GetCursorPosition(); startCY = cy / editor:GetEffectiveScale() end)
+  sbThumb:SetScript("OnMouseUp", function() dragging = false end)
+  sbThumb:SetScript("OnUpdate", function()
+    if not dragging then return end
+    local maxS, range = C._editorMaxScroll or 0, PANE_H - sbThumb:GetHeight()
+    if maxS <= 0 or range <= 0 then return end
+    local _, cy = GetCursorPosition(); local moved = startCY - (cy / editor:GetEffectiveScale())
+    C:SetEditorScroll(startScroll + (moved / range) * maxS)
+  end)
+  C:BuildEditor(scrollChild)
 
   -- ---- Footer strip (shared by the landing + the editor) ----
   -- Horizontal divider above the footer controls (Figma).

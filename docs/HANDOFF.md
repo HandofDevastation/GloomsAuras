@@ -595,19 +595,21 @@ one step per QA pass; never declare done before he confirms in-game.**
 - **Phase 3 — Profiles.** ✅ **DONE + QA'd 2026-07-08** (see BUILT list): schema-2 migration + `GA.global`/
   `GA.db` split (`fc41649`), switcher UI (`6deae65`). Feature complete; nothing left open here.
 
-### ▶▶ START HERE (session 10) — CONTINUE THE REDESIGNED UI BUILD (mid-way through)
+### ▶▶ START HERE (session 12) — RECONFIRM the session-11 UI batch, then CONTINUE the UI build
 
 **READ [docs/UI-REDESIGN.md](UI-REDESIGN.md) — the "▶▶ BUILD STATUS & ARCHITECTURE" section at the BOTTOM is the
-live pickup point** (control language, panel geometry, Lua caps, the accordion architecture, what's built + QA'd,
-and the exact NEXT steps). The section above it holds the original session-8 design decisions (still valid).
+live pickup point** (control language, panel geometry, Lua caps, accordion architecture, what's built + QA'd, the
+exact NEXT steps, and the session-11 Learnings). The section above it holds the session-8 design decisions (valid).
 
-**Where we are (session 9, 2026-07-09→10):** the redesign is being built slice-by-slice, **pixel-perfect to Figma,
-QA'd in-game each slice** (Jason is ruthlessly picky — see the pixel-perfect-every-pass memory). DONE + QA'd:
-**Landing/shell**, **Appearance section**, **left-pane buttons**, **Aura Trigger(s)** (flat + nested group),
-**Text**. BUILT pending-QA: **Effects & Motion → Glow** (Motion parked). NEXT: **Sounds**, then **Aura Load
-Conditions** (visibility), a **deferred-polish pass**, then **Slice 4 = the BAR editor** (has real engine-vs-mock
-gaps to resolve with Jason: segments/border/2nd-color + the bar text/countdown features), then **Slice 5 = Texture
-editor**. Full detail + every gotcha is in the UI-REDESIGN build-status section.
+**Where we are (end of session 11, 2026-07-13):** Sound-timing feature + target-debuff tracking fix are DONE, QA'd,
+committed + pushed (`55a2d97`). On top of that, a **UI batch is BUILT + committed but NOT reconfirmed in-game**:
+**Sounds section**, **Aura Load Conditions section**, **editor scrollbar**, **glow overflow fix**, **left-list
+RefreshList fix**, and a **`SetSelected` crash fix** (a row missing `setEnabled` blanked the Trigger section + hid
+the group controls — see UI-REDESIGN Learnings). **▶ DO FIRST:** `/reload` → click an existing aura → confirm the
+**Trigger section shows conditions + group controls are back** → open **Load Conditions**, confirm it **scrolls,
+doesn't spill into the footer** → glance at **Glow** Custom-Color on its own row. THEN: **deferred-polish pass** →
+**Slice 4 = the BAR editor** (real engine-vs-mock gaps to resolve with Jason: segments/border/2nd-color + bar
+text/countdown) → **Slice 5 = Texture editor**. Full detail + gotchas in the UI-REDESIGN build-status section.
 
 Locked bar decisions (unchanged): **only TWO bar types — Duration & Stacks** (Cooldown = a Duration bar on a
 different clock). **A bar has NO multi-trigger builder — its source IS its trigger.** The bar ENGINE (all 3 modes)
@@ -819,6 +821,29 @@ real proc is **aura-only (no matching cooldown entry)**; a cooldown-buff appears
 - His Warlock (main) character/profile is **"Gloomwick - Stormrage"**; his Hunter is **"Gloomvale - Stormrage"**
   (account folder `AELWYN`; both profiles exist and are correctly populated). After Phase-3 QA he may have
   leftover test profiles (e.g. "Copy Test") — harmless; deletable from the Profiles drawer.
+- **Session end 2026-07-13 (ELEVENTH session) — Sound-timing feature + tracking fix SHIPPED; UI batch BUILT
+  (pending in-game reconfirm).** TWO commits' worth, but note the UI half wasn't re-QA'd before close.
+  1. **Per-timing aura sounds + target-debuff tracking fix — DONE, QA'd, committed + pushed (`55a2d97`).**
+     Sounds now have a **"Play:" timing** (`cfg.sound.on` = trigger / untrigger / pandemic) driven by hooking
+     Blizzard's `CooldownViewerItemMixin:TriggerAlertEvent` (secret-safe — plain enum). A single "debuff active on
+     target" trigger leaf routes its sound through the aura's real apply/remove events → **no re-fire on target
+     swap** (Jason's gripe). QA'd: trigger + wear-off + pandemic (on Agony). **Pandemic is PER-SPELL + target-only**
+     (`GetValidAlertTypes` must list it; UA = noPANDEMIC, Agony/Corruption/Haunt = yes); self-buff "about to expire"
+     is NOT reachable (secret time). BUNDLED FIX: a `buff_active` condition on a debuff in **Tracked Buffs** went
+     stale (OnActiveStateChanged doesn't re-fire for target debuffs) → `CDM:RepollBuffPresence` re-derives
+     `buffActive` from live aura PRESENCE (auraInstanceID + C_UnitAuras) on UNIT_AURA/PLAYER_TARGET_CHANGED + a
+     ~0.2s safety poll + a Discover seed, with an IsActive fallback. **CDM placement (Tracked Buffs vs Bars) no
+     longer matters** — a bug made it seem to; fixed. `/ga trace` rewritten: recurses trigger groups (was crashing
+     on `GetSpellName(nil)`), shows each leaf's mirror + bound state + `alerts=[…PANDEMIC/noPANDEMIC]`.
+  2. **UI batch — BUILT + committed, PENDING FINAL QA (Config.lua):** **Sounds** section (`C:BuildSoundSection`),
+     **Aura Load Conditions** section (`C:BuildLoadConditionsSection` — inline visibility, replaces the per-aura
+     Visibility drawer), **editor scrollbar** (ScrollFrame + scroll child + draggable margin thumb, so a tall
+     section doesn't spill into the footer), **glow Custom-Color own-row** overflow fix, **left-list RefreshList
+     on ShowEditor** (was blank until scroll), and a **`SetSelected` crash fix** (Load-Conditions disable-switch
+     row shipped without `setEnabled` → `r:setEnabled()` threw → blanked Trigger section + hid group controls; the
+     "Survival Hunter spec-switch bug" was really this). **⚠ NOT reconfirmed in-game after the crash fix** — Jason
+     closed the session for handoff. **Watch:** a `MakeDropdown` menu near a scrolled viewport bottom can clip (see
+     Learnings). **Lua caps OK:** chunk 194/200, `Build` 34/60 upvalues. All committed + pushed at session end.
 - **Session end 2026-07-10 (NINTH session) — UI REDESIGN BUILD, slices 1–3c. Mid-build; details in
   [docs/UI-REDESIGN.md](UI-REDESIGN.md) "▶▶ BUILD STATUS" (the live pickup point).** Built + QA'd pixel-perfect
   to Figma: **Landing/shell** (620×740, state machine, footer, `ga_logo_full.png`), **Appearance** section,
